@@ -1,0 +1,16 @@
+dev/
+folder_paths.json
+BUILD/
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+dist/
+*.spec
+.vscode/
+.idea/
+Thumbs.db
+.DS_Store
+desktop.ini
+build.bat
