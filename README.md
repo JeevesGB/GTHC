@@ -6,7 +6,7 @@ GT Hybrid Garage (GTHG) is a desktop tool for creating hybrid cars in Gran Turis
   [![Python](https://img.shields.io/badge/Python-3.8%2B-blue.svg)](https://www.python.org/)
   [![PyQt](https://img.shields.io/badge/UI-PyQt6-41CD52.svg)](https://www.riverbankcomputing.com/software/pyqt/)
   ![Platform](https://img.shields.io/badge/platform-Windows-lightgrey.svg)
-  [![GitHub release](https://img.shields.io/github/v/release/JeevesGB/GTExplorer)](https://github.com/JeevesGB/GTHG/releases)
+  [![GitHub release](https://img.shields.io/github/v/release/JeevesGB/GTHG)](https://github.com/JeevesGB/GTHG/releases)
 
 ---
 
