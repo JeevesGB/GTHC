@@ -233,7 +233,7 @@ class CarPickerDialog(QDialog):
 class HybridGarage(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("GT3 Hybrid Garage")
+        self.setWindowTitle("GT3 Hybrid Creator")
         self.resize(1100, 720)
         self.setMinimumSize(860, 520)
         self.setAcceptDrops(True)
@@ -288,7 +288,7 @@ class HybridGarage(QMainWindow):
 
         head = QHBoxLayout()
         head.setSpacing(10)
-        head.addWidget(_label("GT3 Hybrid Garage", "title"))
+        head.addWidget(_label("GT3 Hybrid Creator", "title"))
         head.addStretch()
         self.region_tabs = QTabWidget()
         self.region_tabs.setDocumentMode(True)
@@ -813,7 +813,7 @@ class HybridGarage(QMainWindow):
         ]
 
     def _hybrid_summary_text(self) -> str:
-        lines = ["GT3 Hybrid Garage", ""]
+        lines = ["GT3 Hybrid Creator", ""]
         for i, p in enumerate(self.plans, 1):
             mode = "overwrite" if p.mode == "copy" else "link"
             lines.append(f"{i}. {p.target_name} <- {p.summary} [{mode}]")
@@ -1210,7 +1210,7 @@ def main() -> int:
         except Exception:
             pass
     app = QApplication(sys.argv)
-    app.setApplicationName("GT3 Hybrid Garage")
+    app.setApplicationName("GT3 Hybrid Creator")
     app.setOrganizationName(SETTINGS_ORG)
     apply_app_theme(app)
     win = HybridGarage()

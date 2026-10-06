@@ -2,6 +2,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 from PyQt6.QtCore import Qt
+from PyQt6.QtGui import QIcon
 from PyQt6.QtWidgets import (
     QApplication,
     QFrame,
@@ -13,16 +14,20 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 from ui.design import APP_STYLE, apply_app_theme
+from version import __version__
 
 
 ROOT = Path(__file__).resolve().parent
+# Bundled files live in sys._MEIPASS when frozen (PyInstaller), else next to this file.
+RES_DIR = Path(getattr(sys, "_MEIPASS", ROOT))
+ICON_PNG = RES_DIR / "ico.png"
 BACKUP_GT3 = ROOT.parent / "gt3_hybrid_gui"
 
 
 class LauncherWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("GT Hybrid Garage")
+        self.setWindowTitle("GT Hybrid Creator")
         self.resize(380, 300)
         self.setFixedSize(300, 300)
         self.setStyleSheet(APP_STYLE)
@@ -36,7 +41,7 @@ class LauncherWindow(QMainWindow):
         root.setContentsMargins(10, 10, 10, 10)
         root.setSpacing(16)
 
-        title = self._label("GT Hybrid Garage", "title")
+        title = self._label("GT Hybrid Creator", "title")
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         root.addWidget(title)
 
@@ -69,7 +74,7 @@ class LauncherWindow(QMainWindow):
         root.addWidget(card)
         root.addStretch()
 
-        foot = QLabel("V0.01")
+        foot = QLabel(f"V{__version__}")
         foot.setStyleSheet("color: #9ca3af; font-size: 11px;")
         foot.setAlignment(Qt.AlignmentFlag.AlignLeft)
         foot.setWordWrap(True)
@@ -150,9 +155,20 @@ class LauncherWindow(QMainWindow):
 
 
 def main() -> int:
+    if sys.platform == "win32":
+        # Own taskbar identity, so Windows shows our icon instead of python.exe's.
+        try:
+            import ctypes
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
+                "GTHybridCreator.GTHC"
+            )
+        except Exception:
+            pass
     app = QApplication(sys.argv)
-    app.setApplicationName("GT Hybrid Garage")
-    app.setOrganizationName("GTHybridGarage")
+    app.setApplicationName("GT Hybrid Creator")
+    app.setOrganizationName("GTHybridCreator")
+    if ICON_PNG.is_file():
+        app.setWindowIcon(QIcon(str(ICON_PNG)))  # every window, incl. GT3/GT4
     apply_app_theme(app)
     win = LauncherWindow()
     win.show()

@@ -205,7 +205,7 @@ class CarPickerDialog(QDialog):
 class GT4HybridWindow(QMainWindow):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("GT4 Hybrid Garage")
+        self.setWindowTitle("GT4 Hybrid Creator")
         self.resize(1100, 720)
         self.setMinimumSize(860, 520)
         self.setStyleSheet(APP_STYLE)
@@ -250,7 +250,7 @@ class GT4HybridWindow(QMainWindow):
         root.setSpacing(6)
 
         head = QHBoxLayout()
-        head.addWidget(_label("GT4 Hybrid Garage", "title"))
+        head.addWidget(_label("GT4 Hybrid Creator", "title"))
         head.addStretch()
         root.addLayout(head)
 
