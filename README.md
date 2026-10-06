@@ -1,4 +1,4 @@
-# GT Hybrid Garage
+# GT Hybrid Creator
 
 GT Hybrid Garage (GTHG) is a desktop tool for creating hybrid cars in Gran Turismo 3 and Gran Turismo 4. Pick a car to change, choose which parts to take from other cars (engine, drivetrain, chassis, tyres and so on), preview the result, and save it back to the game database.
 
