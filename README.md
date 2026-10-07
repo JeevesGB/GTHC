@@ -1,41 +1,58 @@
-# GT Hybrid Creator
+# GT Hybrid Creator (GTHC)
 
-GT Hybrid Creator (GTHC) is a desktop tool for creating hybrid cars in Gran Turismo 3 and Gran Turismo 4. Pick a car to change, choose which parts to take from other cars (engine, drivetrain, chassis, tyres and so on), preview the result, and save it back to the game database.
+Desktop tool for building **hybrid cars** in **Gran Turismo 3** and **Gran Turismo 4**.
 
-  [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-  [![Python](https://img.shields.io/badge/Python-3.8%2B-blue.svg)](https://www.python.org/)
-  [![PyQt](https://img.shields.io/badge/UI-PyQt6-41CD52.svg)](https://www.riverbankcomputing.com/software/pyqt/)
-  ![Platform](https://img.shields.io/badge/platform-Windows-lightgrey.svg)
-  [![GitHub release](https://img.shields.io/github/v/release/JeevesGB/GTHG)](https://github.com/JeevesGB/GTHG/releases)
+Pick a target car, pull engine / drivetrain / chassis / tyre (and other) parts from donors, preview power curves on a dyno graph, then write the result back to the game database.
+
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Python](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](https://www.python.org/)
+[![PyQt](https://img.shields.io/badge/UI-PyQt6-41CD52.svg)](https://www.riverbankcomputing.com/software/pyqt/)
+![Platform](https://img.shields.io/badge/platform-Windows-lightgrey.svg)
+[![GitHub release](https://img.shields.io/github/v/release/JeevesGB/GTHC)](https://github.com/JeevesGB/GTHC/releases)
+
+---
+
+## Features
+
+- **GT3** — multi-region paramdb (JP / EU / US), overwrite or link modes, backups, ZIP export  
+- **GT4** — SpecDB load (including Huffman-compressed tables), hybrid part swaps, save to `DEFAULT_PARTS.dbt`, backup & ZIP  
+- **Car picker** — search, year filters, sort by name / year / power / **brand**, manufacturer logos  
+- **Spec sheet** — Stock / Hybrid / Δ  
+- **Dyno graph** — torque & power vs RPM (stock vs hybrid)  
+- **Hybrid list** — edit, duplicate, remove; save count on the button  
+- Drag-and-drop folder open, recent folders, unsaved-changes warning  
+- Launcher with GT3 / GT4 branding; runs **without a console window**
+
+---
+
+## Requirements
+
+- **Windows** (`run.bat` is Windows-oriented; the app is Python + Qt)
+- [Python](https://www.python.org/downloads/) **3.10+** (developed on 3.12). Tick **Add python.exe to PATH** in the installer.
+- Extracted game database / SpecDB files from **your own** copy of the game (see [Game files](#game-files))
 
 ---
 
 ## Setup
 
-### 1. Requirements
-
-- Windows (the included `run.bat` is for Windows; the app itself is plain Python and Qt)
-- [Python](https://www.python.org/downloads/) 3.10 or newer (developed on 3.12). On Windows, tick **Add python.exe to PATH** in the installer.
-- The extracted database files from your own copy of the game (see [Game files](#game-files) below)
-
-### 2. Get the project
-
-Download the project as a ZIP and extract it, or clone it:
+### 1. Get the project
 
 ```bash
-git clone <your-repo-url> gt_hybrid_garage
-cd gt_hybrid_garage
+git clone https://github.com/JeevesGB/GTHC.git
+cd GTHC
 ```
 
-### 3. Install dependencies
+Or download the ZIP from GitHub and extract it.
+
+### 2. Install dependencies
 
 ```bash
 pip install -r requirements.txt
 ```
 
-This installs PyQt6 (the window toolkit) and matplotlib (the dyno graph).
+Installs **PyQt6** (UI) and **matplotlib** (dyno graph).
 
-Optional, to keep the install isolated from the rest of your system:
+Optional virtual environment:
 
 ```bash
 python -m venv .venv
@@ -43,103 +60,96 @@ python -m venv .venv
 pip install -r requirements.txt
 ```
 
-### 4. Run
+### 3. Run
 
-Either double-click `run.bat`, or from a terminal:
+Double-click **`run.bat`**, or:
 
 ```bash
-python launcher.py
+pythonw src\launcher.py
 ```
 
-> `run.bat` only starts the app. It does not install anything, so complete step 3 first.
-
-### Game files
-
-The tool edits extracted game files, not the disc image or the console itself. Extract the files first, and **keep a separate copy of the originals** in case you want to roll back.
-
-| Game | Folder to select | What it must contain |
-| --- | --- | --- |
-| Gran Turismo 3 | the extracted `database` folder | `paramdb*.db` files, plus the matching `paramstr`, `paramunistr` and `id_db_*` files so car names show up |
-| Gran Turismo 4 | a SpecDB folder such as `GT4_PREMIUM_US2560` | `GENERIC_CAR.dbt` and `DEFAULT_PARTS.dbt` |
+`run.bat` uses `pythonw` so **no console window** appears. It does not install packages — complete step 2 first.
 
 ---
 
-### First Time Setup 
-Upon launching this window will appear, select which game you would like to create a hybrid for. 
+## Game files
 
-<p align="center">
-  <img src="img/1.png" alt="GT Hybrid Creator launcher" width="300">
-</p>
+The tool edits **extracted** database files, not the disc image or console. Always keep a backup of the originals.
 
-## Gran Turismo 3
-
-### Open your database folder
-
-Click **Gran Turismo 3** in the launcher. The first time, you are asked for the database folder. Pick the folder that holds the `paramdb*.db` files.
-
-![Selecting the GT3 database folder](img/2.png)
-
-The folder is remembered in `folder_paths.json` (in the project folder), so the next launch opens straight into it. Use **Change folder...** in the toolbar to switch to a different one. You can also drag a folder onto the window.
-
-Once loaded, the toolbar shows the folder path and how many regions were found. Use the **JP / EU / US** tabs to switch region. 
-
->Hybrids you add to the list are applied to every loaded region, so you only need to make each one once. If a car is missing from a region, that region skips the hybrid.
-
-![GT3 window after loading a folder](img/3.png)
-
-### Make a hybrid
-
-**1. Choose the car to change.** Click the **Target** box and search by name, power, year or layout. This car keeps its 3D model and body.
-
-![Choosing the car to change](img/4.png)
-
-**2. Choose donors.** Each section (Engine & power, Drivetrain & gearing, Chassis/suspension & brakes, Tyres, Car info) has a **Take all from** box. Pick the donor car, or leave it on *Keep this car's own*. Use **Part by part** to choose individual parts, or **Copy all parts from one car...** to take everything from a single donor.
-
-![Target car selected, with the spec sheet and dyno graph](img/5.png)
-
-**3. Check the preview.** The spec sheet compares the car as it is now against the hybrid, and the graph overlays the stock and hybrid torque and power curves. In the example below, the Acura NSX takes its engine, turbo/supercharger, intercooler, exhaust and flywheel from the Diablo GT Car.
-
-![Donor selected, showing the hybrid preview](img/6.png)
-
-**4. Pick how parts are applied.**
-
-| Mode | What it does |
-| --- | --- |
-| **Overwrite the car's own parts** | Recommended. Copies the donor's parts into the car, so shop upgrades stay with this car. |
-| **Link to the donor's parts** | Only the car entry's pointers change. The car shares the donor's parts. |
-
-**5. Add to list, then save.** Click **Add to list.** to put the hybrid in the Hybrid list. Repeat for as many cars as you like, then click **Save hybrids...**. You can write straight into the folder or export a ZIP that leaves the folder unchanged.
-
-### Backups
-
-- **Backup now...** copies the loaded `paramdb` files to `*.bak` in the database folder.
-- **Save hybrids...** also writes `*.bak` backups the first time it saves into the folder.
-- Saving into the folder writes a `hybrids.txt` summary next to the database files.
+| Game | Folder to select | Must contain |
+|------|------------------|--------------|
+| **Gran Turismo 3** | Extracted `database` folder | `paramdb*.db`, plus matching `paramstr` / `paramunistr` / `id_db_*` files so names resolve |
+| **Gran Turismo 4** | SpecDB folder (e.g. `GT4_PREMIUM_US2560`) | `GENERIC_CAR.dbt`, `DEFAULT_PARTS.dbt` (and related `.idi` files) |
 
 ---
 
-## Gran Turismo 4
+## Quick start
 
-Click **Gran Turismo 4** in the launcher and select your SpecDB folder (for example `GT4_PREMIUM_US2560`). The path is remembered; you can also drag a SpecDB folder onto the window.
+1. Launch the app → choose **Gran Turismo 3** or **Gran Turismo 4**.
+2. Select (or drag in) your database / SpecDB folder. The path is remembered.
+3. **Target** — car to change (keeps body / 3D model).
+4. **Donors** — set group donors or use **Part by part**; or **Copy all parts from one car…**.
+5. Check the **spec sheet** and **dyno**, then **Add to list**.
+6. **Save hybrids…** — write into the folder, or export a **ZIP** that leaves the folder unchanged.
 
-- Loads all cars (Huffman-compressed tables are supported)
-- Spec sheet shows **Stock / Hybrid / Δ** (including peak PS); dyno annotates peak power and redline
-- Part groups show a **changed** badge and **Reset**; hybrid list supports **Edit**, **Duplicate**, **Remove**
-- **Save hybrids…** — write into the SpecDB folder, or export a **ZIP** that leaves the folder unchanged (`Ctrl+S`); `Ctrl+B` backs up `DEFAULT_PARTS.dbt`
-- Unsaved changes warn on close; Recent folders menu in the toolbar
+### GT3 notes
+
+- Hybrids apply to **every loaded region** (JP / EU / US). Missing cars in a region are skipped.
+- **Overwrite** (recommended): copies donor part data into the car; shop upgrades stay with that car.  
+- **Link**: only pointers change; the car shares the donor’s part rows.
+- **Backup now…** and first in-folder save create `*.bak` copies.
+
+### GT4 notes
+
+- Save updates **`DEFAULT_PARTS.dbt` only** (link-style part keys). Body/model stay with the target.
+- Output is **uncompressed** SpecDB; the game accepts both compressed and uncompressed tables.
+- First save creates `DEFAULT_PARTS.dbt.bak`. **Ctrl+S** save, **Ctrl+B** backup.
+
+---
+
+## Layout
+
+| Area | Contents |
+|------|----------|
+| **Left** | Target car, part groups, **hybrid list** (edit / duplicate / remove / save) |
+| **Right** | Spec sheet (Stock / Hybrid / Δ) and dyno graph |
+
+Car picker supports brand filter/sort and logo badges (`src/ui/brands/`).
+
+---
+
+## Build a Windows binary (optional)
+
+With [PyInstaller](https://pyinstaller.org/) available:
+
+```bash
+build.bat
+```
+
+This packages the launcher, game modules, icons, and brand logos into a distributable folder/exe.
 
 ---
 
 ## Troubleshooting
 
 | Problem | Fix |
-| --- | --- |
-| `'python' is not recognized` | Reinstall Python and tick **Add python.exe to PATH**, or use `py launcher.py`. |
-| `ModuleNotFoundError: No module named 'PyQt6'` | Run `pip install -r requirements.txt` (inside your virtual environment, if you made one). |
-| No dyno graph | matplotlib is missing. Run `pip install -r requirements.txt`. |
-| "No paramdb*.db found" | You selected the wrong folder. Pick the one that directly contains the `.db` files. |
-| It keeps asking for the folder | The saved folder no longer exists, or the project folder is read-only so `folder_paths.json` cannot be written. |
+|---------|-----|
+| `'python' is not recognized` | Reinstall Python with **Add to PATH**, or use `py -3 src\launcher.py`. |
+| `No module named 'PyQt6'` | `pip install -r requirements.txt` (in your venv if you use one). |
+| No dyno graph | Install matplotlib via the same requirements file. |
+| `No paramdb*.db found` | Select the folder that **directly** contains the `.db` files. |
+| SpecDB load failed | Confirm `GENERIC_CAR.dbt` and `DEFAULT_PARTS.dbt` are present. |
+| Folder prompt every launch | Saved path missing, or project folder is read-only (`folder_paths.json`). |
+| Console window appears | Use `run.bat` / `pythonw`, not plain `python`. |
 
 ---
 
-V0.01
+## Disclaimer
+
+This project is for **personal / educational** use with game files you legally own. Always back up databases before saving. Gran Turismo is a trademark of Sony Interactive Entertainment / Polyphony Digital; this tool is unofficial and unaffiliated.
+
+---
+
+## License
+
+[MIT](LICENSE) © 2026 JeevesGB
