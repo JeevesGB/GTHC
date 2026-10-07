@@ -120,12 +120,13 @@ Once loaded, the toolbar shows the folder path and how many regions were found. 
 
 ## Gran Turismo 4
 
-Click **Gran Turismo 4** in the launcher and select your SpecDB folder (for example `GT4_PREMIUM_US2560`). The path is remembered the same way as for GT3.
+Click **Gran Turismo 4** in the launcher and select your SpecDB folder (for example `GT4_PREMIUM_US2560`). The path is remembered; you can also drag a SpecDB folder onto the window.
 
 - Loads all cars (Huffman-compressed tables are supported)
-- Pick a target car and donors for Engine, Chassis, Gear and so on, the same way as in GT3
-- **Add to list.** applies the swap to `DEFAULT_PARTS` **in memory** (link mode) and adds it to the Hybrid list
-- **Save hybrids...** is a placeholder for now: writing compressed `.dbt` files back is **not implemented yet**, so GT4 hybrids exist only until you close the window
+- Spec sheet shows **Stock / Hybrid / Δ** (including peak PS); dyno annotates peak power and redline
+- Part groups show a **changed** badge and **Reset**; hybrid list supports **Edit**, **Duplicate**, **Remove**
+- **Save hybrids…** — write into the SpecDB folder, or export a **ZIP** that leaves the folder unchanged (`Ctrl+S`); `Ctrl+B` backs up `DEFAULT_PARTS.dbt`
+- Unsaved changes warn on close; Recent folders menu in the toolbar
 
 ---
 

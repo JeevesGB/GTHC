@@ -1,5 +1,6 @@
 from __future__ import annotations
 import struct
+import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -106,9 +107,14 @@ class DbtTable:
             self.data_list = self.code_list = self.template_info = self.template_data = 0
             self.data_block = pos
 
+        # index -> modified row bytes (after hybrid edits)
+        self.dirty_rows: Dict[int, bytes] = {}
+
     def get_row_by_index(self, index: int) -> bytes:
         if index < 0 or index >= self.row_count:
             raise IndexError(index)
+        if index in self.dirty_rows:
+            return self.dirty_rows[index]
         off = self.row_offs[index]
         pos = self.data_block + off
         if not self.compressed:
@@ -127,6 +133,47 @@ class DbtTable:
             else:
                 hi = mid - 1
         return None
+
+    def set_row_by_index(self, index: int, data: bytes) -> None:
+        if index < 0 or index >= self.row_count:
+            raise IndexError(index)
+        if len(data) != self.row_size:
+            raise ValueError(
+                f"row size {len(data)} != expected {self.row_size}"
+            )
+        self.dirty_rows[index] = bytes(data)
+
+    def to_uncompressed_bytes(self) -> bytes:
+        """Serialize the full table as an uncompressed GTDB file.
+
+        SpecDB loaders accept both compressed and uncompressed tables.
+        Writing uncompressed avoids re-implementing Huffman encoding.
+        """
+        be = self.big
+        # Clear the compress bit; keep endianness signalling intact.
+        attr = self.attr & ~1
+        if be and attr < 0x100:
+            attr |= 0x100
+
+        header = bytearray(16)
+        header[0:4] = b"GTDB"
+        if be:
+            struct.pack_into(">HHI i", header, 4, attr, self.aligned, self.row_count, self.row_size)
+        else:
+            struct.pack_into("<HHI i", header, 4, attr, self.aligned, self.row_count, self.row_size)
+
+        index_block = bytearray(self.row_count * 8)
+        data_block = bytearray()
+        for i in range(self.row_count):
+            rid = self.row_ids[i]
+            off = len(data_block)
+            if be:
+                struct.pack_into(">ii", index_block, i * 8, rid, off)
+            else:
+                struct.pack_into("<ii", index_block, i * 8, rid, off)
+            data_block.extend(self.get_row_by_index(i))
+
+        return bytes(header) + bytes(index_block) + bytes(data_block)
 
     def _extract_row(self, pos: int) -> bytes:
         huff = self._extract_huffman_part(pos)
@@ -526,5 +573,104 @@ def apply_part_swap(
     row = bytearray(dp.get_row_by_index(idx))
     off = col_offset(DEFAULT_PARTS_COLS, part_name)
     write_key(row, off, new_key[0], new_key[1], little=not dp.big)
+    dp.set_row_by_index(idx, bytes(row))
 
     target.parts[part_name] = new_key
+
+
+def save_default_parts(
+    db: SpecDB,
+    dest: Optional[Path] = None,
+    backup: bool = True,
+) -> Path:
+    """Write DEFAULT_PARTS.dbt (uncompressed) with all hybrid edits applied.
+
+    Parameters
+    ----------
+    db :
+        Loaded SpecDB (must have dirty rows from apply_part_swap).
+    dest :
+        Output path. Defaults to the original DEFAULT_PARTS.dbt path.
+    backup :
+        If True and dest already exists, copy it to ``*.bak`` first
+        (only when no backup is present yet).
+
+    Returns
+    -------
+    Path
+        The path written.
+    """
+    if db.default_parts is None:
+        raise RuntimeError("SpecDB not loaded")
+    dp = db.default_parts
+    out = Path(dest) if dest is not None else dp.path
+    out = out.resolve()
+
+    if backup and out.is_file():
+        bak = out.with_suffix(out.suffix + ".bak")
+        if not bak.is_file():
+            bak.write_bytes(out.read_bytes())
+
+    data = dp.to_uncompressed_bytes()
+    out.write_bytes(data)
+    return out
+
+
+def write_hybrids_summary(
+    db: SpecDB,
+    plans: List[dict],
+    dest: Path,
+) -> None:
+    """Write a plain-text summary of applied hybrids next to the SpecDB."""
+    lines = [
+        "GT Hybrid Creator — GT4 hybrids",
+        f"SpecDB: {db.folder}",
+        f"DEFAULT_PARTS rows dirty: {len(db.default_parts.dirty_rows) if db.default_parts else 0}",
+        "",
+    ]
+    for i, p in enumerate(plans, 1):
+        lines.append(f"{i}. {p.get('target_name', '?')} (id {p.get('target_id')})")
+        lines.append(f"   mode: {p.get('mode', 'link')}")
+        lines.append(f"   {p.get('summary', '')}")
+        lines.append("")
+    dest.write_text("\n".join(lines), encoding="utf-8")
+
+
+def backup_default_parts(db: SpecDB) -> Path:
+    """Copy the original DEFAULT_PARTS.dbt to DEFAULT_PARTS.dbt.bak."""
+    if db.default_parts is None:
+        raise RuntimeError("SpecDB not loaded")
+    src = db.default_parts.path
+    if not src.is_file():
+        raise FileNotFoundError(src)
+    bak = src.with_suffix(src.suffix + ".bak")
+    bak.write_bytes(src.read_bytes())
+    return bak
+
+
+def export_hybrids_zip(
+    db: SpecDB,
+    plans: List[dict],
+    zip_path: Path,
+) -> Path:
+    """Export modified DEFAULT_PARTS.dbt + hybrids.txt into a ZIP (folder unchanged)."""
+    if db.default_parts is None:
+        raise RuntimeError("SpecDB not loaded")
+    data = db.default_parts.to_uncompressed_bytes()
+    summary_lines = [
+        "GT Hybrid Creator — GT4 hybrids (ZIP export)",
+        f"SpecDB: {db.folder}",
+        f"DEFAULT_PARTS rows dirty: {len(db.default_parts.dirty_rows)}",
+        "",
+    ]
+    for i, p in enumerate(plans, 1):
+        summary_lines.append(f"{i}. {p.get('target_name', '?')} (id {p.get('target_id')})")
+        summary_lines.append(f"   mode: {p.get('mode', 'link')}")
+        summary_lines.append(f"   {p.get('summary', '')}")
+        summary_lines.append("")
+    summary = "\n".join(summary_lines)
+    zip_path = Path(zip_path)
+    with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("DEFAULT_PARTS.dbt", data)
+        zf.writestr("hybrids.txt", summary.encode("utf-8"))
+    return zip_path

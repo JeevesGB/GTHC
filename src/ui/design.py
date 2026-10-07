@@ -21,6 +21,10 @@ COLORS = {
     "rule": "#e8ebef",
     "grid": "#eef0f3",
     "danger": "#dc2626",
+    "success": "#16a34a",
+    "delta_up": "#16a34a",
+    "delta_down": "#dc2626",
+    "focus": "#93c5fd",
 }
 
 APP_STYLE = f"""
@@ -51,6 +55,14 @@ QLabel#tag {{
     color: {COLORS["text_muted"]};
     font-weight: 500;
 }}
+QLabel#badge {{
+    font-size: 10.5px;
+    font-weight: 600;
+    color: {COLORS["accent"]};
+    background: {COLORS["accent_soft"]};
+    border-radius: 8px;
+    padding: 1px 7px;
+}}
 QLabel#cardTitle {{
     font-size: 12.5px;
     font-weight: 700;
@@ -63,20 +75,37 @@ QLabel#fieldLabel {{
     letter-spacing: 0.3px;
 }}
 QLabel#gameTitle {{
-    font-size: 15px;
+    font-size: 14px;
     font-weight: 700;
     color: {COLORS["text"]};
     background: transparent;
 }}
 QLabel#gameDesc {{
     qproperty-alignment: AlignCenter;
-    font-size: 12px;
+    font-size: 11.5px;
     color: {COLORS["text_muted"]};
     background: transparent;
 }}
 QLabel#subtitle {{
     font-size: 13px;
     color: {COLORS["text_muted"]};
+}}
+QLabel#deltaUp {{
+    color: {COLORS["delta_up"]};
+    font-weight: 600;
+}}
+QLabel#deltaDown {{
+    color: {COLORS["delta_down"]};
+    font-weight: 600;
+}}
+QLabel#successBanner {{
+    background: #ecfdf5;
+    color: {COLORS["success"]};
+    border: 1px solid #a7f3d0;
+    border-radius: 4px;
+    padding: 6px 10px;
+    font-size: 12px;
+    font-weight: 500;
 }}
 
 QFrame#card {{
@@ -94,12 +123,12 @@ QFrame#rule {{
 QPushButton {{
     background: {COLORS["surface"]};
     border: 1px solid {COLORS["border_strong"]};
-    border-radius: 2px;
-    padding: 4px 10px;
-    font-size: 18px;
+    border-radius: 3px;
+    padding: 5px 12px;
+    font-size: 12px;
     font-weight: 500;
     color: {COLORS["text"]};
-    min-height: 16px;
+    min-height: 18px;
 }}
 QPushButton:hover {{
     border-color: {COLORS["accent"]};
@@ -110,6 +139,10 @@ QPushButton:disabled {{
     color: {COLORS["text_disabled"]};
     background: {COLORS["surface_muted"]};
     border-color: #e5e7eb;
+}}
+QPushButton:focus {{
+    border-color: {COLORS["accent"]};
+    outline: none;
 }}
 QPushButton#primary {{
     background: {COLORS["accent"]};
@@ -135,31 +168,47 @@ QPushButton#link {{
     font-weight: 500;
 }}
 QPushButton#link:hover {{ color: {COLORS["accent_hover"]}; }}
+QPushButton#danger {{
+    color: {COLORS["danger"]};
+    border-color: #fecaca;
+}}
+QPushButton#danger:hover {{
+    background: #fef2f2;
+    border-color: {COLORS["danger"]};
+}}
 QPushButton#donor {{
     text-align: left;
-    padding: 5px 8px;
+    padding: 6px 10px;
     background: {COLORS["surface"]};
     border: 1px solid {COLORS["border_strong"]};
     border-radius: 4px;
     font-size: 12px;
+    min-height: 28px;
 }}
 QPushButton#donor:hover {{ border-color: {COLORS["accent"]}; }}
+QPushButton#donor:focus {{
+    border-color: {COLORS["accent"]};
+    background: {COLORS["accent_soft"]};
+}}
 QPushButton#game {{
     background: {COLORS["surface"]};
     border: 1px solid {COLORS["border_strong"]};
-    border-radius: 6px;
-    padding: 5px 5px;
-    text-align: left;
-    font-size: 14px;
+    border-radius: 8px;
+    padding: 6px 10px;
+    text-align: center;
+    font-size: 13px;
     font-weight: 600;
     color: {COLORS["text"]};
-    min-height: 50px;
+    min-height: 60px;
 }}
 QPushButton#game:hover {{
     border-color: {COLORS["accent"]};
     background: {COLORS["accent_soft"]};
 }}
 QPushButton#game:pressed {{ background: #dbe6ff; }}
+QPushButton#game:focus {{
+    border-color: {COLORS["accent"]};
+}}
 
 QLineEdit {{
     background: {COLORS["surface"]};
@@ -266,6 +315,26 @@ QToolBar QToolButton:hover {{
     background: {COLORS["accent_soft"]};
     border-color: {COLORS["border_strong"]};
 }}
+QProgressBar {{
+    border: 1px solid {COLORS["border"]};
+    border-radius: 3px;
+    background: {COLORS["surface_muted"]};
+    text-align: center;
+    max-height: 12px;
+}}
+QProgressBar::chunk {{
+    background: {COLORS["accent"]};
+    border-radius: 2px;
+}}
+QComboBox {{
+    background: {COLORS["surface"]};
+    border: 1px solid {COLORS["border_strong"]};
+    border-radius: 4px;
+    padding: 4px 8px;
+    min-height: 18px;
+}}
+QComboBox:focus {{ border-color: {COLORS["accent"]}; }}
+QComboBox::drop-down {{ border: none; width: 20px; }}
 """
 
 
@@ -330,7 +399,7 @@ def donor_button(main: str, sub: str = "", active: bool = False) -> QPushButton:
     btn = QPushButton()
     btn.setObjectName("donor")
     btn.setCursor(Qt.CursorShape.PointingHandCursor)
-    btn.setMinimumHeight(30)
+    btn.setMinimumHeight(32)
     btn.setText(main if not sub else f"{main}\n{sub}")
     _style_donor(btn, active)
     return btn
@@ -339,12 +408,12 @@ def donor_button(main: str, sub: str = "", active: bool = False) -> QPushButton:
 def _style_donor(btn: QPushButton, active: bool) -> None:
     if active:
         btn.setStyleSheet(
-            f"QPushButton#donor {{ text-align: left; padding: 5px 8px; "
+            f"QPushButton#donor {{ text-align: left; padding: 6px 10px; "
             f"border-color: {COLORS['accent']}; background: {COLORS['accent_soft']}; }}"
         )
     else:
         btn.setStyleSheet(
-            "QPushButton#donor { text-align: left; padding: 5px 8px; }"
+            "QPushButton#donor { text-align: left; padding: 6px 10px; }"
         )
 
 

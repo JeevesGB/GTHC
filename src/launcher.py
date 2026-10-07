@@ -1,11 +1,12 @@
 from __future__ import annotations
 import sys
 from pathlib import Path
-from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QIcon
+from PyQt6.QtCore import Qt, QSize
+from PyQt6.QtGui import QIcon, QPixmap
 from PyQt6.QtWidgets import (
     QApplication,
     QFrame,
+    QHBoxLayout,
     QLabel,
     QMainWindow,
     QMessageBox,
@@ -14,13 +15,15 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 from ui.design import APP_STYLE, apply_app_theme
+from ui.folder_paths import get_folder, get_last_game, set_last_game
 from version import __version__
 
 
 ROOT = Path(__file__).resolve().parent
-# Bundled files live in sys._MEIPASS when frozen (PyInstaller), else next to this file.
 RES_DIR = Path(getattr(sys, "_MEIPASS", ROOT))
 ICON_PNG = RES_DIR / "ico.png"
+GT3_LOGO = RES_DIR / "gt3" / "gt3.png"
+GT4_LOGO = RES_DIR / "gt4" / "gt4.png"
 BACKUP_GT3 = ROOT.parent / "gt3_hybrid_gui"
 
 
@@ -28,8 +31,7 @@ class LauncherWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("GT Hybrid Creator")
-        self.resize(380, 300)
-        self.setFixedSize(300, 300)
+        self.setFixedSize(340, 380) # (Width,Height)
         self.setStyleSheet(APP_STYLE)
 
         self._gt3_win = None
@@ -38,12 +40,24 @@ class LauncherWindow(QMainWindow):
         central = QWidget()
         self.setCentralWidget(central)
         root = QVBoxLayout(central)
-        root.setContentsMargins(10, 10, 10, 10)
-        root.setSpacing(16)
+        root.setContentsMargins(14, 12, 14, 8)
+        root.setSpacing(8)
 
-        title = self._label("GT Hybrid Creator", "title")
-        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        root.addWidget(title)
+        # App icon as primary branding
+        icon_lab = QLabel()
+        icon_lab.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        if ICON_PNG.is_file():
+            pix = QPixmap(str(ICON_PNG))
+            if not pix.isNull():
+                icon_lab.setPixmap(
+                    pix.scaled(
+                        72,
+                        72,
+                        Qt.AspectRatioMode.KeepAspectRatio,
+                        Qt.TransformationMode.SmoothTransformation,
+                    )
+                )
+        root.addWidget(icon_lab)
 
         sub = self._label(
             "Choose a game. Each tool uses its own data format and window.",
@@ -55,30 +69,49 @@ class LauncherWindow(QMainWindow):
         card = QFrame()
         card.setObjectName("card")
         card_l = QVBoxLayout(card)
-        card_l.setContentsMargins(6, 6, 6, 6)
-        card_l.setSpacing(10)
+        card_l.setContentsMargins(8, 8, 8, 8)
+        card_l.setSpacing(8)
+
+        gt3_folder = get_folder("gt3")
+        gt4_folder = get_folder("gt4")
         card_l.addWidget(
             self._game_button(
+                GT3_LOGO,
                 "Gran Turismo 3",
-                "paramdb folder",
+                self._folder_hint(gt3_folder, "paramdb folder"),
                 self._open_gt3,
             )
         )
         card_l.addWidget(
             self._game_button(
+                GT4_LOGO,
                 "Gran Turismo 4",
-                "SpecDB folder",
+                self._folder_hint(gt4_folder, "SpecDB folder"),
                 self._open_gt4,
             )
         )
         root.addWidget(card)
-        root.addStretch()
 
-        foot = QLabel(f"V{__version__}")
-        foot.setStyleSheet("color: #9ca3af; font-size: 11px;")
-        foot.setAlignment(Qt.AlignmentFlag.AlignLeft)
-        foot.setWordWrap(True)
-        root.addWidget(foot)
+        foot = QHBoxLayout()
+        foot.setContentsMargins(0, 0, 0, 0)
+        ver = QLabel(f"V{__version__}")
+        ver.setStyleSheet("color: #9ca3af; font-size: 11px;")
+        foot.addWidget(ver)
+        foot.addStretch()
+        root.addLayout(foot)
+
+        last = get_last_game()
+        if last == "gt3":
+            self.statusBar().showMessage("Last opened: Gran Turismo 3", 3000)
+        elif last == "gt4":
+            self.statusBar().showMessage("Last opened: Gran Turismo 4", 3000)
+
+    @staticmethod
+    def _folder_hint(path, fallback: str) -> str:
+        if path is None:
+            return fallback
+        name = path.name
+        return name if len(name) <= 28 else name[:25] + "…"
 
     @staticmethod
     def _label(text: str, obj: str = "") -> QLabel:
@@ -88,30 +121,59 @@ class LauncherWindow(QMainWindow):
         lab.setWordWrap(True)
         return lab
 
-    def _game_button(self, title: str, desc: str, slot) -> QPushButton:
+    def _game_button(
+        self,
+        logo_path: Path,
+        title: str,
+        desc: str,
+        slot,
+    ) -> QPushButton:
+        """Logo-only button; title/desc used for tooltip and accessibility."""
         btn = QPushButton()
         btn.setObjectName("game")
         btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn.setMinimumHeight(64)
+        btn.setToolTip(f"{title}\n{desc}")
+        btn.setAccessibleName(title)
 
-        inner = QVBoxLayout(btn)
-        inner.setContentsMargins(4, 2, 4, 2)
-        inner.setSpacing(2)
-        inner.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout = QVBoxLayout(btn)
+        layout.setContentsMargins(12, 8, 12, 8)
+        layout.setSpacing(0)
+        layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
-        t = QLabel(title)
-        t.setObjectName("gameTitle")
-        t.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        logo = QLabel()
+        logo.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        logo.setStyleSheet("background: transparent;")
+        logo.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        if logo_path.is_file():
+            pix = QPixmap(str(logo_path))
+            if not pix.isNull():
+                logo.setPixmap(
+                    pix.scaled(
+                        200,
+                        48,
+                        Qt.AspectRatioMode.KeepAspectRatio,
+                        Qt.TransformationMode.SmoothTransformation,
+                    )
+                )
+        elif ICON_PNG.is_file():
+            pix = QPixmap(str(ICON_PNG))
+            if not pix.isNull():
+                logo.setPixmap(
+                    pix.scaled(
+                        40,
+                        40,
+                        Qt.AspectRatioMode.KeepAspectRatio,
+                        Qt.TransformationMode.SmoothTransformation,
+                    )
+                )
+        layout.addWidget(logo)
 
-        d = QLabel(desc)
-        d.setObjectName("gameDesc")
-        d.setAlignment(Qt.AlignmentFlag.AlignCenter)
-
-        inner.addWidget(t)
-        inner.addWidget(d)
         btn.clicked.connect(slot)
         return btn
 
     def _open_gt3(self) -> None:
+        set_last_game("gt3")
         if not getattr(sys, "frozen", False):
             gt3_pkg = ROOT / "gt3"
             if (gt3_pkg / "hybrid_gui.py").is_file():
@@ -144,6 +206,7 @@ class LauncherWindow(QMainWindow):
         self._gt3_win.show()
 
     def _open_gt4(self) -> None:
+        set_last_game("gt4")
         from gt4.window import GT4HybridWindow
 
         if self._gt4_win is not None and self._gt4_win.isVisible():
@@ -156,7 +219,6 @@ class LauncherWindow(QMainWindow):
 
 def main() -> int:
     if sys.platform == "win32":
-        # Own taskbar identity, so Windows shows our icon instead of python.exe's.
         try:
             import ctypes
             ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
@@ -168,7 +230,7 @@ def main() -> int:
     app.setApplicationName("GT Hybrid Creator")
     app.setOrganizationName("GTHybridCreator")
     if ICON_PNG.is_file():
-        app.setWindowIcon(QIcon(str(ICON_PNG)))  # every window, incl. GT3/GT4
+        app.setWindowIcon(QIcon(str(ICON_PNG)))
     apply_app_theme(app)
     win = LauncherWindow()
     win.show()
