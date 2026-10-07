@@ -142,4 +142,4 @@ Click **Gran Turismo 4** in the launcher and select your SpecDB folder (for exam
 
 ---
 
-V0.01
+###### JeevesGB
