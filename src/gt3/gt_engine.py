@@ -552,6 +552,7 @@ def classify_file(name: str, raw: bytes) -> Optional[Dict[str, str]]:
 class CarName:
     name: str
     code: str
+    maker: str = ""
 
 def car_names(
     db: Db,
@@ -584,7 +585,7 @@ def car_names(
         si = id_map.get(car_hash(db, ci))
         if si is not None and 0 <= si < len(id_str.strings):
             code = id_str.strings[si]
-    return CarName(name=name, code=code)
+    return CarName(name=name, code=code, maker=maker or "")
 
 def _crc32(data: bytes) -> int:
     return zlib.crc32(data) & 0xFFFFFFFF

@@ -124,11 +124,11 @@ QPushButton {{
     background: {COLORS["surface"]};
     border: 1px solid {COLORS["border_strong"]};
     border-radius: 3px;
-    padding: 5px 12px;
+    padding: 3px 10px;
     font-size: 12px;
     font-weight: 500;
     color: {COLORS["text"]};
-    min-height: 18px;
+    min-height: 16px;
 }}
 QPushButton:hover {{
     border-color: {COLORS["accent"]};
@@ -178,12 +178,12 @@ QPushButton#danger:hover {{
 }}
 QPushButton#donor {{
     text-align: left;
-    padding: 6px 10px;
+    padding: 3px 8px;
     background: {COLORS["surface"]};
     border: 1px solid {COLORS["border_strong"]};
     border-radius: 4px;
-    font-size: 12px;
-    min-height: 28px;
+    font-size: 11.5px;
+    min-height: 22px;
 }}
 QPushButton#donor:hover {{ border-color: {COLORS["accent"]}; }}
 QPushButton#donor:focus {{
@@ -399,7 +399,7 @@ def donor_button(main: str, sub: str = "", active: bool = False) -> QPushButton:
     btn = QPushButton()
     btn.setObjectName("donor")
     btn.setCursor(Qt.CursorShape.PointingHandCursor)
-    btn.setMinimumHeight(32)
+    btn.setMinimumHeight(24)
     btn.setText(main if not sub else f"{main}\n{sub}")
     _style_donor(btn, active)
     return btn
@@ -408,12 +408,12 @@ def donor_button(main: str, sub: str = "", active: bool = False) -> QPushButton:
 def _style_donor(btn: QPushButton, active: bool) -> None:
     if active:
         btn.setStyleSheet(
-            f"QPushButton#donor {{ text-align: left; padding: 6px 10px; "
+            f"QPushButton#donor {{ text-align: left; padding: 3px 8px; "
             f"border-color: {COLORS['accent']}; background: {COLORS['accent_soft']}; }}"
         )
     else:
         btn.setStyleSheet(
-            "QPushButton#donor { text-align: left; padding: 6px 10px; }"
+            "QPushButton#donor { text-align: left; padding: 3px 8px; }"
         )
 
 

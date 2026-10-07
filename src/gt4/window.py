@@ -32,6 +32,7 @@ from PyQt6.QtWidgets import (
     QPushButton,
     QRadioButton,
     QScrollArea,
+    QSizePolicy,
     QSplitter,
     QStatusBar,
     QTableWidget,
@@ -49,6 +50,7 @@ from ui.design import (
     rule as _rule,
     set_donor_button,
 )
+from ui.car_picker import CarPickerDialog, PickerCar
 try:
     import matplotlib
     matplotlib.use("Agg")
@@ -144,131 +146,6 @@ class PlanRecord:
     mode: str  # "link" for now
     picks: Dict[str, int]  # part key -> donor car id
     summary: str
-
-
-class CarPickerDialog(QDialog):
-
-    def __init__(
-        self,
-        cars: List[CarInfo],
-        title: str = "Choose a car",
-        allow_keep: bool = False,
-        parent=None,
-    ):
-        super().__init__(parent)
-        self.setWindowTitle(title)
-        self.resize(520, 500)
-        self.setStyleSheet(APP_STYLE)
-        self._cars = cars
-        self._allow_keep = allow_keep
-        self._result: Optional[object] = None  # int id, or "" for keep
-
-        root = QVBoxLayout(self)
-        root.setContentsMargins(12, 12, 12, 12)
-        root.setSpacing(8)
-        root.addWidget(_label(title, "cardTitle"))
-
-        filt_row = QHBoxLayout()
-        self.search = QLineEdit()
-        self.search.setPlaceholderText("Search name, label, year, engine…")
-        self.search.setClearButtonEnabled(True)
-        self.search.textChanged.connect(self._filter)
-        filt_row.addWidget(self.search, 1)
-
-        self.year_min = QLineEdit()
-        self.year_min.setPlaceholderText("Year ≥")
-        self.year_min.setFixedWidth(64)
-        self.year_min.setClearButtonEnabled(True)
-        self.year_min.textChanged.connect(self._filter)
-        filt_row.addWidget(self.year_min)
-
-        self.year_max = QLineEdit()
-        self.year_max.setPlaceholderText("Year ≤")
-        self.year_max.setFixedWidth(64)
-        self.year_max.setClearButtonEnabled(True)
-        self.year_max.textChanged.connect(self._filter)
-        filt_row.addWidget(self.year_max)
-        root.addLayout(filt_row)
-
-        self.list = QListWidget()
-        self.list.setUniformItemSizes(True)
-        self.list.itemDoubleClicked.connect(self._accept_item)
-        self.list.itemActivated.connect(self._accept_item)
-        root.addWidget(self.list, 1)
-
-        self.count_lab = _label("", "muted")
-        root.addWidget(self.count_lab)
-
-        buttons = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
-        )
-        buttons.accepted.connect(self._accept)
-        buttons.rejected.connect(self.reject)
-        root.addWidget(buttons)
-        self._filter("")
-        self.search.setFocus()
-
-    def _filter(self, _q: str = "") -> None:
-        self.list.clear()
-        terms = [t for t in self.search.text().lower().split() if t]
-        y_min = y_max = None
-        try:
-            if self.year_min.text().strip():
-                y_min = int(self.year_min.text().strip())
-        except ValueError:
-            y_min = None
-        try:
-            if self.year_max.text().strip():
-                y_max = int(self.year_max.text().strip())
-        except ValueError:
-            y_max = None
-
-        if self._allow_keep and not terms and y_min is None and y_max is None:
-            item = QListWidgetItem("Keep this car's own")
-            item.setData(Qt.ItemDataRole.UserRole, "")
-            item.setSizeHint(QSize(100, 28))
-            self.list.addItem(item)
-
-        hits: List[CarInfo] = []
-        for c in self._cars:
-            if y_min is not None and (not c.year or c.year < y_min):
-                continue
-            if y_max is not None and (not c.year or c.year > y_max):
-                continue
-            blob = f"{c.name} {c.label} {c.year}".lower()
-            eng = c.parts.get("Engine")
-            if eng:
-                blob += f" eng{eng[0]}"
-            if all(t in blob for t in terms):
-                hits.append(c)
-
-        for c in hits[:400]:
-            eng = c.parts.get("Engine")
-            eng_s = f" · eng {eng[0]}" if eng else ""
-            sub = f"{c.label} · {c.year}{eng_s}" if c.year else f"{c.label}{eng_s}"
-            item = QListWidgetItem(f"{c.name}\n{sub}")
-            item.setData(Qt.ItemDataRole.UserRole, c.row_id)
-            item.setSizeHint(QSize(100, 40))
-            self.list.addItem(item)
-        extra = max(0, len(hits) - 400)
-        self.count_lab.setText(
-            f"{len(hits)} cars" + (" (showing 400)" if extra else "")
-        )
-        if self.list.count():
-            self.list.setCurrentRow(0)
-
-    def _accept_item(self, item: QListWidgetItem) -> None:
-        self._result = item.data(Qt.ItemDataRole.UserRole)
-        self.accept()
-
-    def _accept(self) -> None:
-        cur = self.list.currentItem()
-        if cur:
-            self._result = cur.data(Qt.ItemDataRole.UserRole)
-        self.accept()
-
-    def selected(self):
-        return self._result
 
 
 class GT4HybridWindow(QMainWindow):
@@ -381,12 +258,12 @@ class GT4HybridWindow(QMainWindow):
         left.setMinimumWidth(340)
         ll = QVBoxLayout(left)
         ll.setContentsMargins(0, 0, 0, 0)
-        ll.setSpacing(6)
+        ll.setSpacing(4)
 
         tcard = _card()
         tl = QVBoxLayout(tcard)
-        tl.setContentsMargins(10, 8, 10, 8)
-        tl.setSpacing(4)
+        tl.setContentsMargins(8, 6, 8, 6)
+        tl.setSpacing(2)
         tl.addWidget(_label("Car to change", "cardTitle"))
         tl.addWidget(_label("TARGET", "fieldLabel"))
         self.target_btn = _donor_btn("Choose a car")
@@ -407,113 +284,20 @@ class GT4HybridWindow(QMainWindow):
 
         self.groups_scroll = QScrollArea()
         self.groups_scroll.setWidgetResizable(True)
-        self.groups_scroll.setHorizontalScrollBarPolicy(
-            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
-        )
+        self.groups_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.groups_scroll.setFrameShape(QFrame.Shape.NoFrame)
         self.groups_widget = QWidget()
         self.groups_layout = QVBoxLayout(self.groups_widget)
         self.groups_layout.setContentsMargins(0, 0, 2, 0)
-        self.groups_layout.setSpacing(6)
+        self.groups_layout.setSpacing(4)
         self.groups_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
         self.groups_scroll.setWidget(self.groups_widget)
-        ll.addWidget(self.groups_scroll, 1)
-        split.addWidget(left)
-
-        right = QWidget()
-        right.setMinimumWidth(320)
-        rl = QVBoxLayout(right)
-        rl.setContentsMargins(0, 0, 0, 0)
-        rl.setSpacing(6)
-
-        scard = _card()
-        sl = QVBoxLayout(scard)
-        sl.setContentsMargins(10, 8, 10, 8)
-        sl.setSpacing(6)
-
-        sh = QHBoxLayout()
-        self.spec_title = _label("Spec sheet", "cardTitle")
-        sh.addWidget(self.spec_title)
-        sh.addStretch()
-        self.spec_tag = _label("", "tag")
-        sh.addWidget(self.spec_tag)
-        sl.addLayout(sh)
-
-        self.spec_empty = _label("Choose a car to see details.", "muted")
-        sl.addWidget(self.spec_empty)
-
-        self.spec_table = QTableWidget(0, 4)
-        self.spec_table.setHorizontalHeaderLabels(["Spec", "Stock", "Hybrid", "Δ"])
-        hdr = self.spec_table.horizontalHeader()
-        hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-        hdr.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
-        hdr.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
-        hdr.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
-        self.spec_table.verticalHeader().setVisible(False)
-        self.spec_table.verticalHeader().setDefaultSectionSize(22)
-        self.spec_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-        self.spec_table.setSelectionMode(QTableWidget.SelectionMode.NoSelection)
-        self.spec_table.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self.spec_table.setShowGrid(False)
-        self.spec_table.setMaximumHeight(240)
-        sl.addWidget(self.spec_table)
-
-        self.dyno_frame = QFrame()
-        self.dyno_frame.setObjectName("card")
-        self.dyno_frame.setMinimumHeight(150)
-        self.dyno_frame.setMaximumHeight(190)
-        dyno_l = QVBoxLayout(self.dyno_frame)
-        dyno_l.setContentsMargins(4, 4, 4, 4)
-        dyno_l.setSpacing(0)
-        if HAS_MPL:
-            self.dyno_fig = Figure(figsize=(4.2, 1.6), dpi=100)
-            self.dyno_fig.patch.set_facecolor("#ffffff")
-            self.dyno_ax = self.dyno_fig.add_subplot(111)
-            self.dyno_ax2 = self.dyno_ax.twinx()
-            self.dyno_canvas = FigureCanvasQTAgg(self.dyno_fig)
-            self.dyno_canvas.setMinimumHeight(140)
-            dyno_l.addWidget(self.dyno_canvas)
-            self._clear_dyno()
-        else:
-            self.dyno_fig = self.dyno_ax = self.dyno_ax2 = self.dyno_canvas = None
-            miss = _label("Install matplotlib for the dynograph:  pip install matplotlib", "muted")
-            miss.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            dyno_l.addWidget(miss)
-        sl.addWidget(self.dyno_frame)
-
-        self.plan_summary = _label("", "muted")
-        self.plan_summary.setWordWrap(True)
-        sl.addWidget(self.plan_summary)
-        sl.addWidget(_rule())
-
-        sl.addWidget(_label("HOW PARTS ARE APPLIED", "fieldLabel"))
-        self.mode_group = QButtonGroup(self)
-        self.radio_link = QRadioButton("Link to the donor's parts")
-        self.radio_link.setToolTip(
-            "DEFAULT_PARTS keys point at the donor part rows. Recommended for SpecDB."
-        )
-        self.radio_link.setChecked(True)
-        self.mode_group.addButton(self.radio_link)
-        sl.addWidget(self.radio_link)
-        sl.addWidget(
-            _label(
-                "Only DEFAULT_PARTS keys change (link mode). Save writes the table to disk.",
-                "muted",
-            )
-        )
-
-        self.apply_btn = QPushButton("Add to list.")
-        self.apply_btn.setObjectName("primary")
-        self.apply_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.apply_btn.setEnabled(False)
-        self.apply_btn.clicked.connect(self._apply_hybrid)
-        sl.addWidget(self.apply_btn)
-        rl.addWidget(scard)
+        ll.addWidget(self.groups_scroll, 2)
 
         ccard = _card()
         cl = QVBoxLayout(ccard)
-        cl.setContentsMargins(10, 8, 10, 8)
-        cl.setSpacing(4)
+        cl.setContentsMargins(8, 6, 8, 6)
+        cl.setSpacing(3)
         ch = QHBoxLayout()
         ch.addWidget(_label("Hybrid list", "cardTitle"))
         ch.addStretch()
@@ -521,10 +305,20 @@ class GT4HybridWindow(QMainWindow):
         ch.addWidget(self.changes_count)
         cl.addLayout(ch)
 
-        self.changes_list = QListWidget()
-        self.changes_list.setMinimumHeight(80)
-        self.changes_list.itemDoubleClicked.connect(self._edit_plan)
-        cl.addWidget(self.changes_list, 1)
+        self.changes_table = QTableWidget(0, 4)
+        self.changes_table.setHorizontalHeaderLabels(["Target", "Parts", "Mode", "Summary"])
+        chdr = self.changes_table.horizontalHeader()
+        chdr.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        chdr.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        chdr.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        chdr.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
+        self.changes_table.verticalHeader().setVisible(False)
+        self.changes_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.changes_table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
+        self.changes_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.changes_table.setMinimumHeight(100)
+        self.changes_table.doubleClicked.connect(self._edit_plan)
+        cl.addWidget(self.changes_table, 1)
 
         row = QHBoxLayout()
         row.setSpacing(6)
@@ -550,17 +344,104 @@ class GT4HybridWindow(QMainWindow):
         cl.addLayout(row)
         cl.addWidget(
             _label(
-                "Save writes uncompressed DEFAULT_PARTS.dbt (game accepts both). "
-                "ZIP export leaves the folder untouched. Ctrl+S to save.",
+                "Save writes uncompressed DEFAULT_PARTS.dbt. ZIP export leaves the folder untouched.",
                 "muted",
             )
         )
-
         self.save_banner = _label("", "successBanner")
         self.save_banner.setVisible(False)
         self.save_banner.setWordWrap(True)
         cl.addWidget(self.save_banner)
-        rl.addWidget(ccard, 1)
+        ll.addWidget(ccard, 1)
+        split.addWidget(left)
+
+        right = QWidget()
+        right.setMinimumWidth(380)
+        rl = QVBoxLayout(right)
+        rl.setContentsMargins(0, 0, 0, 0)
+        rl.setSpacing(4)
+
+        scard = _card()
+        sl = QVBoxLayout(scard)
+        sl.setContentsMargins(8, 6, 8, 6)
+        sl.setSpacing(4)
+
+        sh = QHBoxLayout()
+        self.spec_title = _label("Spec sheet", "cardTitle")
+        sh.addWidget(self.spec_title)
+        sh.addStretch()
+        self.spec_tag = _label("", "tag")
+        sh.addWidget(self.spec_tag)
+        sl.addLayout(sh)
+
+        self.spec_empty = _label("Choose a car to see details.", "muted")
+        sl.addWidget(self.spec_empty)
+
+        self.spec_table = QTableWidget(0, 4)
+        self.spec_table.setHorizontalHeaderLabels(["Spec", "Stock", "Hybrid", "Δ"])
+        hdr = self.spec_table.horizontalHeader()
+        hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        hdr.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        hdr.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        hdr.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
+        self.spec_table.verticalHeader().setVisible(False)
+        self.spec_table.verticalHeader().setDefaultSectionSize(22)
+        self.spec_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.spec_table.setSelectionMode(QTableWidget.SelectionMode.NoSelection)
+        self.spec_table.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.spec_table.setShowGrid(False)
+        self.spec_table.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        sl.addWidget(self.spec_table, 2)
+
+        self.dyno_frame = QFrame()
+        self.dyno_frame.setObjectName("card")
+        self.dyno_frame.setMinimumHeight(220)
+        self.dyno_frame.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        dyno_l = QVBoxLayout(self.dyno_frame)
+        dyno_l.setContentsMargins(2, 2, 2, 2)
+        dyno_l.setSpacing(0)
+        if HAS_MPL:
+            self.dyno_fig = Figure(figsize=(5.2, 2.8), dpi=100)
+            self.dyno_fig.patch.set_facecolor("#ffffff")
+            self.dyno_ax = self.dyno_fig.add_subplot(111)
+            self.dyno_ax2 = self.dyno_ax.twinx()
+            self.dyno_canvas = FigureCanvasQTAgg(self.dyno_fig)
+            self.dyno_canvas.setMinimumHeight(200)
+            self.dyno_canvas.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+            dyno_l.addWidget(self.dyno_canvas)
+            self._clear_dyno()
+        else:
+            self.dyno_fig = self.dyno_ax = self.dyno_ax2 = self.dyno_canvas = None
+            miss = _label("Install matplotlib for the dynograph:  pip install matplotlib", "muted")
+            miss.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            dyno_l.addWidget(miss)
+        sl.addWidget(self.dyno_frame, 3)
+
+        self.plan_summary = _label("", "muted")
+        self.plan_summary.setWordWrap(True)
+        self.plan_summary.setMaximumHeight(36)
+        sl.addWidget(self.plan_summary)
+
+        mode_row = QHBoxLayout()
+        mode_row.setSpacing(8)
+        self.mode_group = QButtonGroup(self)
+        self.radio_link = QRadioButton("Link to donor parts")
+        self.radio_link.setToolTip(
+            "DEFAULT_PARTS keys point at the donor part rows. Recommended for SpecDB."
+        )
+        self.radio_link.setChecked(True)
+        self.mode_group.addButton(self.radio_link)
+        mode_row.addWidget(self.radio_link)
+        mode_row.addStretch()
+        self.apply_btn = QPushButton("Add to list")
+        self.apply_btn.setObjectName("primary")
+        self.apply_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.apply_btn.setEnabled(False)
+        self.apply_btn.clicked.connect(self._apply_hybrid)
+        mode_row.addWidget(self.apply_btn)
+        sl.addLayout(mode_row)
+
+        rl.addWidget(scard, 1)
 
         split.addWidget(right)
         split.setSizes([560, 480])
@@ -569,6 +450,12 @@ class GT4HybridWindow(QMainWindow):
 
         self.status = QStatusBar()
         self.setStatusBar(self.status)
+        self.load_bar = QProgressBar()
+        self.load_bar.setMaximumWidth(140)
+        self.load_bar.setFixedHeight(12)
+        self.load_bar.setTextVisible(False)
+        self.load_bar.setVisible(False)
+        self.status.addPermanentWidget(self.load_bar)
         self.work_area.setVisible(False)
 
     def _try_load_saved(self) -> None:
@@ -648,9 +535,16 @@ class GT4HybridWindow(QMainWindow):
             self._load_folder(Path(path))
 
     def _load_folder(self, folder: Path, quiet: bool = False) -> None:
+        self.status.showMessage(f"Loading SpecDB from {folder.name}…")
+        if hasattr(self, "load_bar"):
+            self.load_bar.setVisible(True)
+            self.load_bar.setRange(0, 0)  # indeterminate
+        QApplication.processEvents()
         try:
             db = load_specdb(folder)
         except Exception as e:
+            if hasattr(self, "load_bar"):
+                self.load_bar.setVisible(False)
             QMessageBox.critical(
                 self,
                 "Failed to load SpecDB",
@@ -658,6 +552,8 @@ class GT4HybridWindow(QMainWindow):
                 "(and matching .idi files).",
             )
             return
+        if hasattr(self, "load_bar"):
+            self.load_bar.setVisible(False)
         self.db = db
         self.folder = folder
         self.target_id = None
@@ -715,6 +611,29 @@ class GT4HybridWindow(QMainWindow):
             parts.append(f"{name}: {', '.join(labs)}")
         return " · ".join(parts)
 
+    def _picker_cars(self) -> list:
+        out = []
+        if not self.db:
+            return out
+        for c in self.db.cars:
+            eng = c.parts.get("Engine")
+            extra = f"eng {eng[0]}" if eng else ""
+            brand = getattr(c, "brand", "") or ""
+            out.append(
+                PickerCar(
+                    id=c.row_id,
+                    name=c.name,
+                    sub=c.label,
+                    search=f"{c.name} {c.label} {c.year} {extra} {brand}",
+                    year=c.year or 0,
+                    power=0.0,
+                    layout="",
+                    extra=extra,
+                    brand=brand,
+                )
+            )
+        return out
+
     def _pick(self, slot: str) -> None:
         if not self.db:
             return
@@ -722,8 +641,11 @@ class GT4HybridWindow(QMainWindow):
         title = "Car to change" if slot == "target" else "Donor for group"
         if slot.startswith("p:"):
             title = "Donor for part"
+        specials = []
+        if allow_keep:
+            specials.append(("", "Keep this car's own", ""))
         dlg = CarPickerDialog(
-            self.db.cars, title=title, allow_keep=allow_keep, parent=self
+            self._picker_cars(), title=title, specials=specials, parent=self
         )
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
@@ -781,13 +703,13 @@ class GT4HybridWindow(QMainWindow):
         )
 
     def _remove_plan(self) -> None:
-        row = self.changes_list.currentRow()
+        row = self.changes_table.currentRow()
         if 0 <= row < len(self.plans):
             self.plans.pop(row)
             self._refresh()
 
     def _edit_plan(self) -> None:
-        row = self.changes_list.currentRow()
+        row = self.changes_table.currentRow()
         if not (0 <= row < len(self.plans)) or not self.db:
             return
         plan = self.plans[row]
@@ -800,7 +722,7 @@ class GT4HybridWindow(QMainWindow):
         self.status.showMessage(f"Editing · {plan.target_name}", 3000)
 
     def _duplicate_plan(self) -> None:
-        row = self.changes_list.currentRow()
+        row = self.changes_table.currentRow()
         if not (0 <= row < len(self.plans)):
             return
         src = self.plans[row]
@@ -957,8 +879,8 @@ class GT4HybridWindow(QMainWindow):
 
             card = _card()
             gl = QVBoxLayout(card)
-            gl.setContentsMargins(10, 8, 10, 8)
-            gl.setSpacing(4)
+            gl.setContentsMargins(8, 5, 8, 5)
+            gl.setSpacing(2)
 
             head = QHBoxLayout()
             head.addWidget(_label(g["label"], "cardTitle"))
@@ -1159,6 +1081,8 @@ class GT4HybridWindow(QMainWindow):
             default_parts_id=car.default_parts_id,
             default_parts_table=car.default_parts_table,
             parts=stock,
+            maker_id=getattr(car, "maker_id", 0),
+            brand=getattr(car, "brand", ""),
         )
         before_curve = engine_curve_for_car(self.db, stock_car)
         after_curve = before_curve
@@ -1237,17 +1161,18 @@ class GT4HybridWindow(QMainWindow):
             self.plan_summary.setText("Pick at least one donor to preview.")
 
     def _refresh_changes(self) -> None:
-        self.changes_list.clear()
+        self.changes_table.setRowCount(0)
         for p in self.plans:
+            r = self.changes_table.rowCount()
+            self.changes_table.insertRow(r)
             n = len(p.picks)
-            item = QListWidgetItem(
-                f"{p.target_name}\n{p.summary}  ·  {n} part{'s' if n != 1 else ''}  ·  {p.mode}"
-            )
-            item.setSizeHint(QSize(100, 52))
-            item.setData(Qt.ItemDataRole.UserRole, p.id)
-            self.changes_list.addItem(item)
+            self.changes_table.setItem(r, 0, QTableWidgetItem(p.target_name))
+            self.changes_table.setItem(r, 1, QTableWidgetItem(str(n)))
+            self.changes_table.setItem(r, 2, QTableWidgetItem(p.mode))
+            self.changes_table.setItem(r, 3, QTableWidgetItem(p.summary))
         n = len(self.plans)
         self.changes_count.setText(str(n))
         label = f"Save hybrids… ({n})" if n else "Save hybrids…"
         self.dl_btn.setText(label)
         self.dl_btn.setEnabled(bool(self.plans))
+

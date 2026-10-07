@@ -31,7 +31,7 @@ class LauncherWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("GT Hybrid Creator")
-        self.setFixedSize(340, 380) # (Width,Height)
+        self.setFixedSize(340, 340)
         self.setStyleSheet(APP_STYLE)
 
         self._gt3_win = None
@@ -218,6 +218,10 @@ class LauncherWindow(QMainWindow):
 
 
 def main() -> int:
+    import os
+    # HiDPI: let Qt scale UI on high-DPI Windows displays
+    os.environ.setdefault("QT_ENABLE_HIGHDPI_SCALING", "1")
+    os.environ.setdefault("QT_AUTO_SCREEN_SCALE_FACTOR", "1")
     if sys.platform == "win32":
         try:
             import ctypes
@@ -226,6 +230,14 @@ def main() -> int:
             )
         except Exception:
             pass
+    # Round scale factors sensibly (125%% / 150%% etc.)
+    try:
+        from PyQt6.QtCore import Qt as _Qt
+        QApplication.setHighDpiScaleFactorRoundingPolicy(
+            _Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
+        )
+    except Exception:
+        pass
     app = QApplication(sys.argv)
     app.setApplicationName("GT Hybrid Creator")
     app.setOrganizationName("GTHybridCreator")

@@ -372,6 +372,8 @@ class CarInfo:
     default_parts_id: int
     default_parts_table: int
     parts: Dict[str, Tuple[int, int]]  # part name -> (key, table_id)
+    maker_id: int = 0
+    brand: str = ""
 
 
 @dataclass
@@ -531,6 +533,12 @@ def load_specdb(folder: Path) -> SpecDB:
         display = (name_map.get(rid) or "").strip() or label
         eng = parts.get("Engine")
         eng_lab = db.engine_labels.get(eng[0], "") if eng else ""
+        maker_id = int(parsed.get("Maker") or 0)
+        try:
+            from ui.makers import maker_name as _maker_name
+            brand = _maker_name(maker_id)
+        except Exception:
+            brand = str(maker_id) if maker_id else ""
         car = CarInfo(
             row_id=rid,
             label=label,
@@ -540,6 +548,8 @@ def load_specdb(folder: Path) -> SpecDB:
             default_parts_id=parts_id,
             default_parts_table=parts_table,
             parts=parts,
+            maker_id=maker_id,
+            brand=brand if brand != "—" else "",
         )
         db.cars.append(car)
         db.by_id[rid] = car
