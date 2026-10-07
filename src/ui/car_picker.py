@@ -1,4 +1,3 @@
-"""Shared car picker dialog used by GT3 and GT4."""
 from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, List, Optional, Sequence, Tuple
@@ -25,7 +24,6 @@ from ui.makers import brand_badge_pixmap
 
 @dataclass
 class PickerCar:
-    """Normalized car row for the shared picker."""
 
     id: Any
     name: str
@@ -53,7 +51,6 @@ def _clean_name(name: str) -> str:
 
 
 class CarPickerDialog(QDialog):
-    """Searchable car table with brand filter/sort and badge icons."""
 
     COLS = ("", "Brand", "Name", "Year", "Power", "Layout", "Details")
 
@@ -265,10 +262,8 @@ class CarPickerDialog(QDialog):
         else:
             hits.sort(key=name_key)
 
-        limit = 500
-        for c in hits[:limit]:
+        for c in hits:
             name = _clean_name(c.name)
-            # If name still starts with brand, leave it; optional strip is risky
             year = str(c.year) if c.year else ""
             if c.power:
                 power = (
@@ -286,11 +281,9 @@ class CarPickerDialog(QDialog):
             details = " · ".join(bits)
             self._add_row(c.id, c.brand or "—", name, year, power, layout, details)
 
-        extra = max(0, len(hits) - limit)
         self.count_lab.setText(
             f"{len(hits)} cars"
             + (f" · {brand_filter}" if brand_filter else "")
-            + (f" (showing {limit})" if extra else "")
         )
         if self.table.rowCount():
             self.table.selectRow(0)

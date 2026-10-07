@@ -1,4 +1,4 @@
-dev/
+dev-dontinclude/
 folder_paths.json
 BUILD/
 __pycache__/
@@ -14,3 +14,4 @@ Thumbs.db
 .DS_Store
 desktop.ini
 build.bat
+GTHG.zip

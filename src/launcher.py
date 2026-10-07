@@ -31,7 +31,7 @@ class LauncherWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("GT Hybrid Creator")
-        self.setFixedSize(340, 340)
+        self.setFixedSize(350, 365) # (WIDTH , HEIGHT)
         self.setStyleSheet(APP_STYLE)
 
         self._gt3_win = None
@@ -43,7 +43,6 @@ class LauncherWindow(QMainWindow):
         root.setContentsMargins(14, 12, 14, 8)
         root.setSpacing(8)
 
-        # App icon as primary branding
         icon_lab = QLabel()
         icon_lab.setAlignment(Qt.AlignmentFlag.AlignCenter)
         if ICON_PNG.is_file():
@@ -128,7 +127,6 @@ class LauncherWindow(QMainWindow):
         desc: str,
         slot,
     ) -> QPushButton:
-        """Logo-only button; title/desc used for tooltip and accessibility."""
         btn = QPushButton()
         btn.setObjectName("game")
         btn.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -219,7 +217,6 @@ class LauncherWindow(QMainWindow):
 
 def main() -> int:
     import os
-    # HiDPI: let Qt scale UI on high-DPI Windows displays
     os.environ.setdefault("QT_ENABLE_HIGHDPI_SCALING", "1")
     os.environ.setdefault("QT_AUTO_SCREEN_SCALE_FACTOR", "1")
     if sys.platform == "win32":
@@ -230,7 +227,6 @@ def main() -> int:
             )
         except Exception:
             pass
-    # Round scale factors sensibly (125%% / 150%% etc.)
     try:
         from PyQt6.QtCore import Qt as _Qt
         QApplication.setHighDpiScaleFactorRoundingPolicy(
