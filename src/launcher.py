@@ -20,7 +20,7 @@ GT3_LOGO = RES_DIR / "gt3" / "gt3.png"
 GT4_LOGO = RES_DIR / "gt4" / "gt4.png"
 BACKUP_GT3 = ROOT.parent / "gt3_hybrid_gui"
 
-SHOW_CAR_CREATOR = False # Set True to activate button
+SHOW_CAR_CREATOR = True #False # Set True to activate button
 
 
 class LauncherWindow(QMainWindow):

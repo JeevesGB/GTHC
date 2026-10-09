@@ -16,6 +16,7 @@ from PyQt6.QtCore import Qt, QSize, QTimer
 from PyQt6.QtGui import QAction, QColor, QBrush
 from PyQt6.QtWidgets import (
     QDialog,
+    QSplitter,
     QApplication,
     QComboBox,
     QFileDialog,
@@ -115,6 +116,7 @@ class PreviewCar:
     torque_curve: List[float] = field(default_factory=list)
     power_curve: List[float] = field(default_factory=list)
     idle_rpm: Optional[int] = None
+    curve_loaded: bool = False
     raw: Any = None  # engine-specific handle
 
 
@@ -122,8 +124,8 @@ class CarCreatorWindow(QMainWindow):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("GT Car Creator")
-        self.resize(1200, 780)
-        self.setMinimumSize(1000, 640)
+        self.resize(1180, 760)
+        self.setMinimumSize(880, 560)
         self.setStyleSheet(APP_STYLE)
 
         self.game: Optional[str] = None  # gt3 | gt4
@@ -134,6 +136,15 @@ class CarCreatorWindow(QMainWindow):
         self._seeding = False
         self._syncing = False
         self._dirty = False
+        self._baseline_rpm: list = []
+        self._baseline_tq: list = []
+        self._baseline_pw: list = []
+        self._redraw_timer = QTimer(self)
+        self._redraw_timer.setSingleShot(True)
+        self._redraw_timer.setInterval(40)
+        self._redraw_timer.timeout.connect(self._flush_redraw)
+        self._pending_dyno = False
+        self._pending_gear = False
 
         # GT3 multi-region support (primary region only for creator v1)
         self._gt3_regions: list = []
@@ -155,6 +166,9 @@ class CarCreatorWindow(QMainWindow):
         act = QAction("Open folder…", self)
         act.triggered.connect(self._open_folder)
         tb.addAction(act)
+        act = QAction("Reload folder", self)
+        act.triggered.connect(self._reload_folder)
+        tb.addAction(act)
         act = QAction("Save database…", self)
         act.triggered.connect(self._save)
         tb.addAction(act)
@@ -162,11 +176,18 @@ class CarCreatorWindow(QMainWindow):
         central = QWidget()
         self.setCentralWidget(central)
         root = QHBoxLayout(central)
-        root.setContentsMargins(10, 8, 10, 8)
-        root.setSpacing(10)
+        root.setContentsMargins(6, 6, 6, 6)
+        root.setSpacing(0)
 
-        # ---- LEFT: setup + form ----
-        left = QVBoxLayout()
+        self._splitter = QSplitter(Qt.Orientation.Horizontal)
+        self._splitter.setChildrenCollapsible(False)
+        self._splitter.setHandleWidth(6)
+        root.addWidget(self._splitter)
+
+        # ---- LEFT: setup + form (scrollable) ----
+        left_host = QWidget()
+        left = QVBoxLayout(left_host)
+        left.setContentsMargins(4, 4, 8, 4)
         left.setSpacing(8)
 
         # Step 1 — source
@@ -328,34 +349,49 @@ class CarCreatorWindow(QMainWindow):
         curve_l.setContentsMargins(8, 10, 8, 8)
         curve_l.setSpacing(6)
         curve_l.addWidget(_label(
-            "Edit RPM / torque points. Power is derived (PS ≈ tq × rpm / 716.2). "
-            "Changes update the dyno live.",
+            "Spin the values or use the buttons. Power is calculated live "
+            "(PS ≈ tq × rpm ÷ 716.2). Peak row is highlighted.",
             "muted",
         ))
-        self.curve_table = QTableWidget(0, 2)
-        self.curve_table.setHorizontalHeaderLabels(["RPM", "Torque (kgf·m)"])
+        self.curve_stats_lab = _label("—", "muted")
+        curve_l.addWidget(self.curve_stats_lab)
+
+        self.curve_table = QTableWidget(0, 3)
+        self.curve_table.setHorizontalHeaderLabels(["RPM", "Torque", "Power (PS)"])
         self.curve_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         self.curve_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
-        self.curve_table.verticalHeader().setVisible(False)
+        self.curve_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        self.curve_table.verticalHeader().setDefaultSectionSize(30)
         self.curve_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        self.curve_table.setMaximumHeight(280)
-        self.curve_table.cellChanged.connect(self._on_curve_edited)
+        self.curve_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.curve_table.setMinimumHeight(220)
         curve_l.addWidget(self.curve_table, 1)
+
         curve_btns = QHBoxLayout()
-        add_pt = QPushButton("Add point")
-        add_pt.setCursor(Qt.CursorShape.PointingHandCursor)
-        add_pt.clicked.connect(self._curve_add_point)
-        del_pt = QPushButton("Remove selected")
-        del_pt.setCursor(Qt.CursorShape.PointingHandCursor)
-        del_pt.clicked.connect(self._curve_remove_point)
-        reset_pt = QPushButton("Reset from template")
-        reset_pt.setCursor(Qt.CursorShape.PointingHandCursor)
-        reset_pt.clicked.connect(self._curve_reset)
-        curve_btns.addWidget(add_pt)
-        curve_btns.addWidget(del_pt)
-        curve_btns.addWidget(reset_pt)
+        for label, slot in (
+            ("+ Point", self._curve_add_point),
+            ("Insert", self._curve_insert_point),
+            ("− Point", self._curve_remove_point),
+            ("Smooth", self._curve_smooth),
+            ("Reset", self._curve_reset),
+        ):
+            b = QPushButton(label)
+            b.setCursor(Qt.CursorShape.PointingHandCursor)
+            b.clicked.connect(slot)
+            curve_btns.addWidget(b)
         curve_btns.addStretch(1)
         curve_l.addLayout(curve_btns)
+
+        scale_c = QHBoxLayout()
+        scale_c.addWidget(_label("Torque ×", "fieldLabel"))
+        for factor, lab in ((0.95, "0.95"), (1.05, "1.05"), (1.10, "1.10")):
+            b = QPushButton(lab)
+            b.setFixedWidth(48)
+            b.setCursor(Qt.CursorShape.PointingHandCursor)
+            b.clicked.connect(lambda checked=False, f=factor: self._curve_scale_torque(f))
+            scale_c.addWidget(b)
+        scale_c.addStretch(1)
+        curve_l.addLayout(scale_c)
         tabs.addTab(curve_w, "Curve")
 
         # --- Gearbox tab ---
@@ -391,8 +427,8 @@ class CarCreatorWindow(QMainWindow):
             sp.setDecimals(3)
             sp.setSingleStep(0.05)
             sp.setSpecialValueText("off")
-            sp.setMinimumWidth(88)
-            sp.setMaximumWidth(100)
+            sp.setMinimumWidth(80)
+            sp.setMaximumWidth(140)
             self.ratio_spins.append(sp)
             row.addWidget(sp)
             # wire after both exist
@@ -432,6 +468,7 @@ class CarCreatorWindow(QMainWindow):
         for w in (self.ps_spin, self.tq_spin, self.rev_spin, self.idle_spin, self.mass_spin, self.wb_spin):
             w.valueChanged.connect(self._on_stats_edited)
         self.drive_spin.currentIndexChanged.connect(self._on_stats_edited)
+        self.label_edit.textChanged.connect(lambda *_: self._update_summary())
         # Sliders drive spins (spin signals then refresh graphs)
         self.ps_slider.valueChanged.connect(lambda v: self._from_slider(self.ps_spin, self.ps_slider, v, 1.0))
         self.tq_slider.valueChanged.connect(lambda v: self._from_slider(self.tq_spin, self.tq_slider, v, 0.1))
@@ -442,6 +479,17 @@ class CarCreatorWindow(QMainWindow):
         self.tq_spin.valueChanged.connect(lambda v: self._from_spin(self.tq_slider, v, 10.0))
         self.rev_spin.valueChanged.connect(lambda v: self._from_spin(self.rev_slider, v, 1.0))
         self.mass_spin.valueChanged.connect(lambda v: self._from_spin(self.mass_slider, v, 1.0))
+
+        # Summary of pending edits
+        sum_card = _card()
+        sum_l = QVBoxLayout(sum_card)
+        sum_l.setContentsMargins(10, 8, 10, 8)
+        sum_l.setSpacing(4)
+        sum_l.addWidget(_label("Summary", "cardTitle"))
+        self.summary_lab = _label("Choose a template to begin.", "muted")
+        self.summary_lab.setWordWrap(True)
+        sum_l.addWidget(self.summary_lab)
+        left.addWidget(sum_card)
 
         # Step 3 — create
         self.create_btn = QPushButton("3 · Create car (in memory)")
@@ -458,14 +506,19 @@ class CarCreatorWindow(QMainWindow):
             self.game_combo.setCurrentIndex(1)
         self.game_combo.currentIndexChanged.connect(self._on_game_changed)
 
-        left_w = QWidget()
-        left_w.setLayout(left)
-        left_w.setMinimumWidth(360)
-        left_w.setMaximumWidth(420)
-        root.addWidget(left_w)
+        left_scroll = QScrollArea()
+        left_scroll.setWidgetResizable(True)
+        left_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        left_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        left_scroll.setWidget(left_host)
+        left_scroll.setMinimumWidth(300)
+        left_scroll.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
+        self._splitter.addWidget(left_scroll)
 
         # ---- RIGHT: stats + graphs ----
-        right = QVBoxLayout()
+        right_host = QWidget()
+        right = QVBoxLayout(right_host)
+        right.setContentsMargins(8, 4, 4, 4)
         right.setSpacing(8)
 
         stats_card = _card()
@@ -508,15 +561,16 @@ class CarCreatorWindow(QMainWindow):
         dl.setContentsMargins(6, 6, 6, 6)
         dl.addWidget(_label("Dyno — torque & power", "cardTitle"))
         if HAS_MPL:
-            self.dyno_fig = Figure(figsize=(5.5, 2.6), dpi=100)
+            self.dyno_fig = Figure(figsize=(5.0, 2.4), dpi=100)
             self.dyno_fig.patch.set_facecolor("#ffffff")
             self.dyno_ax = self.dyno_fig.add_subplot(111)
             self.dyno_ax2 = self.dyno_ax.twinx()
             self.dyno_canvas = FigureCanvasQTAgg(self.dyno_fig)
-            self.dyno_canvas.setMinimumHeight(180)
+            self.dyno_canvas.setMinimumHeight(140)
             self.dyno_canvas.setSizePolicy(
                 QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
             )
+            self.dyno_canvas.mpl_connect("resize_event", lambda e: self._on_mpl_resize("dyno"))
             dl.addWidget(self.dyno_canvas, 1)
         else:
             self.dyno_fig = self.dyno_ax = self.dyno_ax2 = self.dyno_canvas = None
@@ -529,23 +583,27 @@ class CarCreatorWindow(QMainWindow):
         gel.setContentsMargins(6, 6, 6, 6)
         gel.addWidget(_label("Geared power — power delivery per gear", "cardTitle"))
         if HAS_MPL:
-            self.gear_fig = Figure(figsize=(5.5, 2.2), dpi=100)
+            self.gear_fig = Figure(figsize=(5.0, 2.0), dpi=100)
             self.gear_fig.patch.set_facecolor("#ffffff")
             self.gear_ax = self.gear_fig.add_subplot(111)
             self.gear_canvas = FigureCanvasQTAgg(self.gear_fig)
-            self.gear_canvas.setMinimumHeight(150)
+            self.gear_canvas.setMinimumHeight(120)
             self.gear_canvas.setSizePolicy(
                 QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
             )
+            self.gear_canvas.mpl_connect("resize_event", lambda e: self._on_mpl_resize("gear"))
             gel.addWidget(self.gear_canvas, 1)
         else:
             self.gear_fig = self.gear_ax = self.gear_canvas = None
             gel.addWidget(_label("Install matplotlib for gearbox graph", "muted"))
         right.addWidget(gear_card, 2)
 
-        right_w = QWidget()
-        right_w.setLayout(right)
-        root.addWidget(right_w, 1)
+        right_host.setMinimumWidth(360)
+        right_host.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self._splitter.addWidget(right_host)
+        self._splitter.setStretchFactor(0, 0)
+        self._splitter.setStretchFactor(1, 1)
+        self._splitter.setSizes([400, 780])
 
         self._clear_graphs("Open a database and choose a template")
 
@@ -560,11 +618,10 @@ class CarCreatorWindow(QMainWindow):
         if tip:
             lab.setToolTip(tip)
             widget.setToolTip(tip)
-        # Give spin/combo boxes room so suffixes don't clip
         if hasattr(widget, "setMinimumHeight"):
-            widget.setMinimumHeight(28)
-        if hasattr(widget, "setMinimumWidth"):
-            widget.setMinimumWidth(120)
+            widget.setMinimumHeight(26)
+        if hasattr(widget, "setSizePolicy"):
+            widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         col.addWidget(lab)
         col.addWidget(widget)
         return col
@@ -590,9 +647,10 @@ class CarCreatorWindow(QMainWindow):
         row.setSpacing(8)
         slider.setMinimumHeight(24)
         row.addWidget(slider, 1)
-        spin.setMinimumWidth(118)
-        spin.setMaximumWidth(150)
+        spin.setMinimumWidth(100)
+        spin.setMaximumWidth(16777215)  # no artificial cap
         spin.setMinimumHeight(28)
+        spin.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
         row.addWidget(spin)
         col.addLayout(row)
         return col
@@ -608,19 +666,8 @@ class CarCreatorWindow(QMainWindow):
         else:
             self.ps_spin.setValue(max(0.0, self.ps_spin.value() * factor))
             self.tq_spin.setValue(max(0.0, self.tq_spin.value() * factor))
-            # Scale table torque column
-            self._seeding = True
-            self.curve_table.blockSignals(True)
-            for i in range(self.curve_table.rowCount()):
-                it = self.curve_table.item(i, 1)
-                if not it:
-                    continue
-                try:
-                    it.setText(f"{float(it.text()) * factor:.2f}")
-                except Exception:
-                    pass
-            self.curve_table.blockSignals(False)
-            self._seeding = False
+            self._curve_scale_torque(factor)
+            return
         self._on_stats_edited()
 
 
@@ -661,6 +708,34 @@ class CarCreatorWindow(QMainWindow):
         slider.setValue(target)
         slider.blockSignals(False)
 
+
+
+    def _set_dirty(self, dirty: bool = True) -> None:
+        self._dirty = dirty
+        base = "GT Car Creator"
+        if self.game:
+            base += f" — {self.game.upper()}"
+        if self.folder:
+            base += f" — {self.folder.name}"
+        if dirty:
+            base += " *"
+        self.setWindowTitle(base)
+        if dirty:
+            self.status.showMessage("Unsaved changes in memory — Save database… to write", 4000)
+
+    def closeEvent(self, event) -> None:
+        if self._dirty:
+            reply = QMessageBox.question(
+                self,
+                "Unsaved cars",
+                "You have cars created in memory that are not saved.\n\n"
+                "Close anyway and lose them?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                event.ignore()
+                return
+        event.accept()
 
     def _install_crash_log(self) -> None:
         """Write uncaught errors to ~/GTHC_car_creator_error.log (pythonw shows nothing)."""
@@ -717,10 +792,44 @@ class CarCreatorWindow(QMainWindow):
             return
         self._load_path(path, game, quiet=True)
 
+
+    def _reload_folder(self) -> None:
+        if not self.folder or not self.game:
+            self._try_load_saved()
+            return
+        if self._dirty:
+            reply = QMessageBox.question(
+                self,
+                "Reload?",
+                "Reload from disk and discard cars created in memory?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                return
+        self._load_path(self.folder, self.game, quiet=False)
+        self._set_dirty(False)
+
     def _on_game_changed(self, *_args) -> None:
         if getattr(self, "_seeding", False):
             return
+        if self._dirty:
+            reply = QMessageBox.question(
+                self,
+                "Switch game?",
+                "Switching game discards cars created in memory. Continue?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                # revert combo
+                self.game_combo.blockSignals(True)
+                idx = self.game_combo.findData(self.game) if self.game else 0
+                if idx >= 0:
+                    self.game_combo.setCurrentIndex(idx)
+                self.game_combo.blockSignals(False)
+                return
         self._try_load_saved()
+        self._set_dirty(False)
+
 
     def _load_path(self, path: Path, game: str, quiet: bool = False) -> bool:
         """Load a database folder and remember it in folder_paths.json."""
@@ -742,6 +851,7 @@ class CarCreatorWindow(QMainWindow):
         self.folder_lab.setText(str(path))
         self.folder_lab.setToolTip(str(path))
         self.create_btn.setEnabled(True)
+        self._set_dirty(False)
         self.status.showMessage(
             f"Loaded {game.upper()} · {len(self.previews)} cars · {path}", 5000,
         )
@@ -859,33 +969,10 @@ class CarCreatorWindow(QMainWindow):
                 main = main[1:].strip()
             if not main:
                 main = f"Car {i}"
-            # Prefer "Name · code" when both exist for disambiguation
             display = main
             if nm.name and nm.code and nm.code not in main:
                 display = f"{main}  ({nm.code})"
-            try:
-                curve = engine_curve(db, i)
-            except Exception:
-                curve = None
-            try:
-                dt = read_drivetrain_finetune(db, i)
-            except Exception:
-                dt = None
-            ratios = []
-            if dt:
-                for k in range(1, 9):
-                    v = getattr(dt, f"ratio_{k}", None)
-                    if v and v > 0:
-                        ratios.append(float(v))
-            rpm, tq, pw = [], [], []
-            if curve:
-                rpm = list(curve.rpm or [])
-                tq = list(curve.torque or [])
-                pw = list(curve.power or [])
-            tq_peak = float(st.torque) if st.torque else None
-            if tq and (tq_peak is None or tq_peak < max(tq) * 0.5):
-                tq_peak = max(tq)
-            rev_lim = int(st.rev_limit) if st.rev_limit else (int(max(rpm)) if rpm else None)
+            # Curves / ratios loaded lazily on template select
             pv = PreviewCar(
                 game="gt3",
                 key=hx,
@@ -893,17 +980,18 @@ class CarCreatorWindow(QMainWindow):
                 label=hx,
                 year=int(st.year or 0),
                 price=int(st.price or 0),
-                ps=float(st.ps) if st.ps else (max(pw) if pw else None),
-                torque=tq_peak,
-                rev_limit=rev_lim,
+                ps=float(st.ps) if st.ps else None,
+                torque=float(st.torque) if st.torque else None,
+                rev_limit=int(st.rev_limit) if st.rev_limit else None,
                 mass=int(st.mass) if st.mass else None,
                 wheelbase=int(st.wheelbase) if st.wheelbase else None,
                 drive=st.drive,
-                gears=st.gears or (len(ratios) or None),
-                ratios=ratios,
-                rpm=rpm,
-                torque_curve=tq,
-                power_curve=pw,
+                gears=st.gears,
+                ratios=[],
+                rpm=[],
+                torque_curve=[],
+                power_curve=[],
+                curve_loaded=False,
                 raw=i,
             )
             self.previews.append(pv)
@@ -912,44 +1000,13 @@ class CarCreatorWindow(QMainWindow):
         if self.previews:
             self._select_template(0)
     def _load_gt4(self, folder: Path) -> None:
-        from gt4_engine import load_specdb, engine_curve_for_car, read_finetune_for_car
+        from gt4_engine import load_specdb
 
         db = load_specdb(folder)
         self.db = {"game": "gt4", "db": db, "path": folder}
         self.previews = []
         for car in db.cars:
-            try:
-                curve = engine_curve_for_car(db, car)
-            except Exception:
-                curve = None
-            try:
-                ft = read_finetune_for_car(db, car)
-            except Exception:
-                ft = None
-            ratios = []
-            if ft and ft.drivetrain:
-                for k in range(1, 9):
-                    v = getattr(ft.drivetrain, f"ratio_{k}", None)
-                    if v and v > 0:
-                        ratios.append(float(v))
-            rpm, tq, pw = [], [], []
-            ps = tq_peak = rev = None
-            if curve:
-                rpm = list(curve.rpm or [])
-                tq = list(curve.torque or [])
-                pw = list(curve.power or [])
-                ps = curve.peak_ps
-                tq_peak = curve.peak_torque
-                rev = curve.rev_limit
-            mass = wheelbase = None
-            if ft and ft.chassis:
-                mass = ft.chassis.mass
-                wheelbase = ft.chassis.wheelbase
-            drive = ft.drivetrain.drive if (ft and ft.drivetrain) else None
-            gears = ft.drivetrain.gears if (ft and ft.drivetrain) else (len(ratios) or None)
-            idle = None
-            if ft and ft.engine and ft.engine.idle_rpm:
-                idle = int(ft.engine.idle_rpm)
+            # Curves / chassis / ratios loaded lazily on template select
             pv = PreviewCar(
                 game="gt4",
                 key=car.row_id,
@@ -957,18 +1014,18 @@ class CarCreatorWindow(QMainWindow):
                 label=car.label,
                 year=int(car.year or 0),
                 price=int(car.price or 0),
-                ps=ps,
-                torque=tq_peak,
-                rev_limit=rev,
-                mass=mass,
-                wheelbase=wheelbase,
-                drive=drive,
-                gears=gears,
-                ratios=ratios,
-                rpm=rpm,
-                torque_curve=tq,
-                power_curve=pw,
-                idle_rpm=idle,
+                ps=None,
+                torque=None,
+                rev_limit=None,
+                mass=None,
+                wheelbase=None,
+                drive=None,
+                gears=None,
+                ratios=[],
+                rpm=[],
+                torque_curve=[],
+                power_curve=[],
+                curve_loaded=False,
                 raw=car,
             )
             self.previews.append(pv)
@@ -978,6 +1035,130 @@ class CarCreatorWindow(QMainWindow):
             self._select_template(0)
 
     # -------------------------------------------------------------- preview
+
+    def _ensure_curve_loaded(self, c: PreviewCar) -> None:
+        """Load engine curve, ratios and chassis the first time a template is selected."""
+        if c.curve_loaded:
+            return
+        if c.game == "gt3":
+            from gt_engine import engine_curve, read_drivetrain_finetune
+            db = self.db["db"]
+            i = int(c.raw) if c.raw is not None else -1
+            if i < 0:
+                c.curve_loaded = True
+                return
+            try:
+                curve = engine_curve(db, i)
+            except Exception:
+                curve = None
+            try:
+                dt = read_drivetrain_finetune(db, i)
+            except Exception:
+                dt = None
+            if curve:
+                c.rpm = list(curve.rpm or [])
+                c.torque_curve = list(curve.torque or [])
+                c.power_curve = list(curve.power or [])
+                if curve.peak_ps and (c.ps is None or float(c.ps) < float(curve.peak_ps) * 0.5):
+                    c.ps = float(curve.peak_ps)
+                if c.torque_curve:
+                    tmax = max(c.torque_curve)
+                    if c.torque is None or float(c.torque) < tmax * 0.5:
+                        c.torque = tmax
+                elif curve.peak_torque:
+                    c.torque = float(curve.peak_torque)
+                if curve.rev_limit:
+                    c.rev_limit = int(curve.rev_limit)
+                elif c.rpm and not c.rev_limit:
+                    c.rev_limit = int(max(c.rpm))
+                if getattr(curve, "idle_rpm", None):
+                    c.idle_rpm = int(curve.idle_rpm)
+            ratios: List[float] = []
+            if dt:
+                for k in range(1, 9):
+                    v = getattr(dt, f"ratio_{k}", None)
+                    if v and v > 0:
+                        ratios.append(float(v))
+                if dt.gears:
+                    c.gears = dt.gears
+                if dt.drive is not None:
+                    c.drive = dt.drive
+            c.ratios = ratios
+            if ratios and not c.gears:
+                c.gears = len(ratios)
+        else:
+            from gt4_engine import engine_curve_for_car, read_finetune_for_car
+            db = self.db["db"]
+            car = c.raw
+            try:
+                curve = engine_curve_for_car(db, car)
+            except Exception:
+                curve = None
+            try:
+                ft = read_finetune_for_car(db, car)
+            except Exception:
+                ft = None
+            if curve:
+                c.rpm = list(curve.rpm or [])
+                c.torque_curve = list(curve.torque or [])
+                c.power_curve = list(curve.power or [])
+                c.ps = float(curve.peak_ps) if curve.peak_ps else (
+                    max(c.power_curve) if c.power_curve else None
+                )
+                c.torque = float(curve.peak_torque) if curve.peak_torque else None
+                if c.torque_curve:
+                    tmax = max(c.torque_curve)
+                    if c.torque is None or float(c.torque) < tmax * 0.5:
+                        c.torque = tmax
+                if c.power_curve and (c.ps is None or float(c.ps) < max(c.power_curve) * 0.5):
+                    c.ps = max(c.power_curve)
+                c.rev_limit = (
+                    int(curve.rev_limit) if curve.rev_limit
+                    else (int(max(c.rpm)) if c.rpm else None)
+                )
+            if ft:
+                if ft.chassis:
+                    c.mass = ft.chassis.mass
+                    c.wheelbase = ft.chassis.wheelbase
+                if ft.drivetrain:
+                    c.drive = ft.drivetrain.drive
+                    ratios = []
+                    for k in range(1, 9):
+                        v = getattr(ft.drivetrain, f"ratio_{k}", None)
+                        if v and v > 0:
+                            ratios.append(float(v))
+                    c.ratios = ratios
+                    c.gears = ft.drivetrain.gears or (len(ratios) or None)
+                if ft.engine and ft.engine.idle_rpm:
+                    c.idle_rpm = int(ft.engine.idle_rpm)
+        c.curve_loaded = True
+
+    def _schedule_redraw(self, *, dyno: bool = False, gear: bool = False) -> None:
+        if dyno:
+            self._pending_dyno = True
+        if gear:
+            self._pending_gear = True
+        if not self._redraw_timer.isActive():
+            self._redraw_timer.start()
+
+    def _flush_redraw(self) -> None:
+        c = self.current
+        do_dyno, do_gear = self._pending_dyno, self._pending_gear
+        self._pending_dyno = False
+        self._pending_gear = False
+        if c is None:
+            return
+        if do_dyno:
+            try:
+                self._draw_dyno(c)
+            except Exception:
+                pass
+        if do_gear:
+            try:
+                self._draw_gearbox(c)
+            except Exception:
+                pass
+
     def _on_template_changed(self) -> None:
         try:
             self._on_template_changed_impl()
@@ -1046,6 +1227,7 @@ class CarCreatorWindow(QMainWindow):
             return
         self._template_index = idx
         self.current = self.previews[int(idx)]
+        self._ensure_curve_loaded(self.current)
         self.template_lab.setText(self.current.name)
         self.template_btn.setText(self.current.name)
         c = self.current
@@ -1112,9 +1294,35 @@ class CarCreatorWindow(QMainWindow):
         self.idle_spin.blockSignals(False)
         self._update_span_label()
         self._seeding = False
+        # Baseline curves for dyno ghost overlay
+        self._baseline_rpm = list(c.rpm or [])
+        self._baseline_tq = list(c.torque_curve or [])
+        self._baseline_pw = list(c.power_curve or [])
         self._fill_stats(c)
+        self._update_summary()
         self._draw_dyno(c)
         self._draw_gearbox(c)
+
+    def _update_summary(self) -> None:
+        if not hasattr(self, "summary_lab"):
+            return
+        if not self.current:
+            self.summary_lab.setText("Choose a template to begin.")
+            return
+        name = self.label_edit.text().strip() or "(unnamed)"
+        ratios = self._read_ratios() if hasattr(self, "ratio_spins") else []
+        asp = self.aspiration_combo.currentText() if hasattr(self, "aspiration_combo") else ""
+        lines = [
+            f"<b>{name}</b>",
+            f"From: {self.current.name}",
+            f"{self.ps_spin.value():.0f} PS · {self.tq_spin.value():.1f} kgf·m · {self.rev_spin.value()} rpm",
+            f"{self.mass_spin.value()} kg · {self.drive_spin.currentText()} · {len(ratios) or '—'} gears",
+        ]
+        if asp:
+            lines.append(asp)
+        if self._dirty:
+            lines.append("<i>Unsaved car(s) in memory</i>")
+        self.summary_lab.setText("<br/>".join(lines))
 
     def _read_ratios(self) -> List[float]:
         ratios: List[float] = []
@@ -1141,13 +1349,13 @@ class CarCreatorWindow(QMainWindow):
             sp.setValue(float(self.current.ratios[i]) if i < len(self.current.ratios) else 0.0)
         self._seeding = False
         self._update_span_label()
-        self._draw_gearbox(self.current)
+        self._schedule_redraw(gear=True)
 
     def _on_ratio_edited(self, *_args) -> None:
         if getattr(self, "_seeding", False):
             return
         self._update_span_label()
-        self._draw_gearbox(self.current)
+        self._schedule_redraw(gear=True)
 
     def _gear_from_slider(self, idx: int, slider_val: int) -> None:
         if getattr(self, "_seeding", False):
@@ -1196,83 +1404,211 @@ class CarCreatorWindow(QMainWindow):
         self._seeding = False
         self._on_ratio_edited()
 
+
     def _fill_curve_table(self, c: "PreviewCar") -> None:
-        self._seeding = True
-        self.curve_table.blockSignals(True)
-        self.curve_table.setRowCount(0)
         rpm = list(c.rpm or [])
         tq = list(c.torque_curve or [])
         n = min(len(rpm), len(tq))
-        self.curve_table.setRowCount(n)
-        for i in range(n):
-            self.curve_table.setItem(i, 0, QTableWidgetItem(str(int(rpm[i]))))
-            self.curve_table.setItem(i, 1, QTableWidgetItem(f"{float(tq[i]):.2f}"))
+        pairs = sorted(((int(rpm[i]), float(tq[i])) for i in range(n)), key=lambda p: p[0])
+        self._seeding = True
+        self.curve_table.blockSignals(True)
+        self.curve_table.setRowCount(0)
+        for r, t in pairs:
+            self._curve_append_row(r, t)
         self.curve_table.blockSignals(False)
         self._seeding = False
+        self._curve_refresh_power_and_stats()
+
+    def _curve_append_row(self, rpm: int, torque: float) -> int:
+        row = self.curve_table.rowCount()
+        self.curve_table.insertRow(row)
+
+        rpm_sp = QSpinBox()
+        rpm_sp.setRange(500, 20000)
+        rpm_sp.setSingleStep(100)
+        rpm_sp.setSuffix(" rpm")
+        rpm_sp.setValue(int(rpm))
+        rpm_sp.setMinimumWidth(100)
+        rpm_sp.valueChanged.connect(self._on_curve_edited)
+
+        tq_sp = QDoubleSpinBox()
+        tq_sp.setRange(0.0, 400.0)
+        tq_sp.setDecimals(2)
+        tq_sp.setSingleStep(0.5)
+        tq_sp.setSuffix(" kgf·m")
+        tq_sp.setValue(float(torque))
+        tq_sp.setMinimumWidth(110)
+        tq_sp.valueChanged.connect(self._on_curve_edited)
+
+        pw_item = QTableWidgetItem("—")
+        pw_item.setFlags(pw_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+        pw_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        self.curve_table.setCellWidget(row, 0, rpm_sp)
+        self.curve_table.setCellWidget(row, 1, tq_sp)
+        self.curve_table.setItem(row, 2, pw_item)
+        return row
 
     def _read_curve_points(self):
         rpm, tq = [], []
         for i in range(self.curve_table.rowCount()):
-            it0 = self.curve_table.item(i, 0)
-            it1 = self.curve_table.item(i, 1)
-            try:
-                r = int(float(it0.text())) if it0 else 0
-                t = float(it1.text()) if it1 else 0.0
-            except Exception:
+            rsp = self.curve_table.cellWidget(i, 0)
+            tsp = self.curve_table.cellWidget(i, 1)
+            if rsp is None or tsp is None:
                 continue
+            r = int(rsp.value())
+            t = float(tsp.value())
             if r > 0:
                 rpm.append(r)
                 tq.append(t)
-        # sort by rpm
         pairs = sorted(zip(rpm, tq), key=lambda x: x[0])
         if not pairs:
             return [], []
         return [p[0] for p in pairs], [p[1] for p in pairs]
 
+    def _curve_refresh_power_and_stats(self) -> None:
+        rpm, tq = self._read_curve_points()
+        peak_i = -1
+        peak_tq = -1.0
+        peak_ps = -1.0
+        peak_ps_i = -1
+        for i in range(self.curve_table.rowCount()):
+            rsp = self.curve_table.cellWidget(i, 0)
+            tsp = self.curve_table.cellWidget(i, 1)
+            item = self.curve_table.item(i, 2)
+            if rsp is None or tsp is None or item is None:
+                continue
+            r = int(rsp.value())
+            t = float(tsp.value())
+            ps = (t * r) / 716.2 if r else 0.0
+            item.setText(f"{ps:.1f}")
+            # highlight peak torque
+            if t > peak_tq:
+                peak_tq = t
+                peak_i = i
+            if ps > peak_ps:
+                peak_ps = ps
+                peak_ps_i = i
+        for i in range(self.curve_table.rowCount()):
+            for col in range(3):
+                w = self.curve_table.cellWidget(i, col)
+                it = self.curve_table.item(i, col)
+                if i == peak_i:
+                    if it:
+                        it.setBackground(QColor("#dbeafe"))
+                else:
+                    if it:
+                        it.setBackground(QColor("#ffffff"))
+        if hasattr(self, "curve_stats_lab"):
+            if not rpm:
+                self.curve_stats_lab.setText("No points")
+            else:
+                pr = rpm[peak_i] if 0 <= peak_i < len(rpm) else 0
+                # peak_i is table row; map carefully
+                # recompute from sorted pairs
+                pairs = list(zip(rpm, tq))
+                ti = max(range(len(pairs)), key=lambda j: pairs[j][1]) if pairs else 0
+                pi = max(range(len(pairs)), key=lambda j: (pairs[j][1] * pairs[j][0]) / 716.2) if pairs else 0
+                self.curve_stats_lab.setText(
+                    f"{len(rpm)} pts · peak {pairs[ti][1]:.1f} kgf·m @ {pairs[ti][0]} rpm"
+                    f" · { (pairs[pi][1]*pairs[pi][0])/716.2 :.0f} PS @ {pairs[pi][0]} rpm"
+                )
+
     def _on_curve_edited(self, *_args) -> None:
         if getattr(self, "_seeding", False) or not self.current:
             return
+        self._curve_refresh_power_and_stats()
         rpm, tq = self._read_curve_points()
         if rpm and tq:
-            # Update peak spins from table max without looping
             self._seeding = True
             self.tq_spin.setValue(max(tq))
-            # approximate peak PS
             pw = [(t * r) / 716.2 for r, t in zip(rpm, tq)]
             if pw:
                 self.ps_spin.setValue(max(pw))
             self._seeding = False
-        self._draw_dyno(self.current)
-        self._draw_gearbox(self.current)
-        if rpm and tq:
             self._stat_labels["Torque"].setText(f"{max(tq):.1f} kgf·m")
             if pw:
                 self._stat_labels["Power"].setText(f"{max(pw):.0f} PS")
+        if hasattr(self, "_update_summary"):
+            self._update_summary()
+        self._schedule_redraw(dyno=True, gear=True)
 
     def _curve_add_point(self) -> None:
-        row = self.curve_table.rowCount()
-        self.curve_table.blockSignals(True)
-        self.curve_table.insertRow(row)
-        last_rpm = 1000
-        if row > 0:
-            it = self.curve_table.item(row - 1, 0)
-            try:
-                last_rpm = int(float(it.text())) + 500 if it else 1000
-            except Exception:
-                last_rpm = 1000
-        self.curve_table.setItem(row, 0, QTableWidgetItem(str(last_rpm)))
-        self.curve_table.setItem(row, 1, QTableWidgetItem("30.00"))
-        self.curve_table.blockSignals(False)
+        last_rpm, last_tq = 1000, 30.0
+        n = self.curve_table.rowCount()
+        if n > 0:
+            rsp = self.curve_table.cellWidget(n - 1, 0)
+            tsp = self.curve_table.cellWidget(n - 1, 1)
+            if rsp:
+                last_rpm = int(rsp.value()) + 500
+            if tsp:
+                last_tq = float(tsp.value())
+        self._seeding = True
+        self._curve_append_row(last_rpm, last_tq)
+        self._seeding = False
+        self._on_curve_edited()
+
+    def _curve_insert_point(self) -> None:
+        row = self.curve_table.currentRow()
+        if row < 0 or row >= self.curve_table.rowCount() - 1:
+            self._curve_add_point()
+            return
+        r0 = self.curve_table.cellWidget(row, 0)
+        r1 = self.curve_table.cellWidget(row + 1, 0)
+        t0 = self.curve_table.cellWidget(row, 1)
+        t1 = self.curve_table.cellWidget(row + 1, 1)
+        if not all((r0, r1, t0, t1)):
+            self._curve_add_point()
+            return
+        mid_r = (int(r0.value()) + int(r1.value())) // 2
+        mid_t = (float(t0.value()) + float(t1.value())) / 2.0
+        # Rebuild with inserted point
+        rpm, tq = self._read_curve_points()
+        pairs = sorted(zip(rpm, tq), key=lambda x: x[0])
+        pairs.append((mid_r, mid_t))
+        pairs = sorted(pairs, key=lambda x: x[0])
+        self._seeding = True
+        self.curve_table.setRowCount(0)
+        for r, t in pairs:
+            self._curve_append_row(r, t)
+        self._seeding = False
         self._on_curve_edited()
 
     def _curve_remove_point(self) -> None:
-        rows = sorted({i.row() for i in self.curve_table.selectedIndexes()}, reverse=True)
-        if not rows:
+        row = self.curve_table.currentRow()
+        if row < 0:
             return
-        self.curve_table.blockSignals(True)
-        for r in rows:
-            self.curve_table.removeRow(r)
-        self.curve_table.blockSignals(False)
+        if self.curve_table.rowCount() <= 2:
+            QMessageBox.information(self, "Curve", "Keep at least two points.")
+            return
+        self._seeding = True
+        self.curve_table.removeRow(row)
+        self._seeding = False
+        self._on_curve_edited()
+
+    def _curve_smooth(self) -> None:
+        """3-point moving average on torque (endpoints fixed)."""
+        rpm, tq = self._read_curve_points()
+        if len(tq) < 3:
+            return
+        new_tq = [tq[0]]
+        for i in range(1, len(tq) - 1):
+            new_tq.append((tq[i - 1] + tq[i] + tq[i + 1]) / 3.0)
+        new_tq.append(tq[-1])
+        self._seeding = True
+        self.curve_table.setRowCount(0)
+        for r, t in zip(rpm, new_tq):
+            self._curve_append_row(r, t)
+        self._seeding = False
+        self._on_curve_edited()
+
+    def _curve_scale_torque(self, factor: float) -> None:
+        self._seeding = True
+        for i in range(self.curve_table.rowCount()):
+            tsp = self.curve_table.cellWidget(i, 1)
+            if tsp:
+                tsp.setValue(max(0.0, float(tsp.value()) * factor))
+        self._seeding = False
         self._on_curve_edited()
 
     def _curve_reset(self) -> None:
@@ -1299,9 +1635,8 @@ class CarCreatorWindow(QMainWindow):
         if d is None:
             d = self.drive_spin.currentIndex()
         self._stat_labels["Layout"].setText(DRIVE_NAMES[d] if isinstance(d, int) and 0 <= d < len(DRIVE_NAMES) else "—")
-        # Live graphs from edited peaks + template curve shape
-        self._draw_dyno(c)
-        self._draw_gearbox(c)
+        self._update_summary()
+        self._schedule_redraw(dyno=True, gear=True)
 
     def _fill_stats(self, c: PreviewCar) -> None:
         def set_(key: str, text: str) -> None:
@@ -1346,7 +1681,22 @@ class CarCreatorWindow(QMainWindow):
             self.gear_fig.tight_layout()
             self.gear_canvas.draw_idle()
 
+    def _on_mpl_resize(self, which: str = "") -> None:
+        """Keep matplotlib figures fitting the canvas after window resize."""
+        try:
+            if which in ("", "dyno") and self.dyno_fig is not None:
+                self.dyno_fig.tight_layout()
+                if self.dyno_canvas is not None:
+                    self.dyno_canvas.draw_idle()
+            if which in ("", "gear") and self.gear_fig is not None:
+                self.gear_fig.tight_layout()
+                if self.gear_canvas is not None:
+                    self.gear_canvas.draw_idle()
+        except Exception:
+            pass
+
     def _scaled_curves(self, c: PreviewCar):
+
         """Curve from the editable table (or template), scaled to peak spins, cut at rev limit."""
         # Prefer live table points
         if hasattr(self, "curve_table") and self.curve_table.rowCount() > 0:
@@ -1394,9 +1744,17 @@ class CarCreatorWindow(QMainWindow):
             self.dyno_ax.set_yticks([])
             self.dyno_ax2.set_yticks([])
         else:
-            self.dyno_ax.plot(rpm, tq, color="#2563eb", lw=2, label="Torque")
+            # Ghost baseline (template) under edited curve
+            br = getattr(self, "_baseline_rpm", None) or []
+            bt = getattr(self, "_baseline_tq", None) or []
+            bp = getattr(self, "_baseline_pw", None) or []
+            if br and bt and len(br) == len(bt):
+                self.dyno_ax.plot(br, bt, color="#93c5fd", lw=1.2, ls="--", alpha=0.7, label="Template tq")
+            if br and bp and len(br) == len(bp):
+                self.dyno_ax2.plot(br, bp, color="#fca5a5", lw=1.2, ls="--", alpha=0.7, label="Template PS")
+            self.dyno_ax.plot(rpm, tq, color="#2563eb", lw=2.2, label="Torque")
             if pw and len(pw) == len(rpm):
-                self.dyno_ax2.plot(rpm, pw, color="#dc2626", lw=2, label="Power")
+                self.dyno_ax2.plot(rpm, pw, color="#dc2626", lw=2.2, label="Power")
             # Rev-limit marker so the control is visibly reflected
             rev = int(self.rev_spin.value()) if hasattr(self, "rev_spin") else 0
             if rev > 0:
@@ -1620,7 +1978,7 @@ class CarCreatorWindow(QMainWindow):
             raw=new_i,
         )
         self.previews.append(pv)
-        self._dirty = True
+        self._set_dirty(True)
         self.template_btn.setText(f"Choose template car…  ({len(self.previews)} cars)")
         self._select_template(len(self.previews) - 1)
         self.status.showMessage(
@@ -1716,7 +2074,7 @@ class CarCreatorWindow(QMainWindow):
             raw=new_car,
         )
         self.previews.append(pv)
-        self._dirty = True
+        self._set_dirty(True)
         self.template_btn.setText(f"Choose template car…  ({len(self.previews)} cars)")
         self._select_template(len(self.previews) - 1)
         self.status.showMessage(
@@ -1779,7 +2137,7 @@ class CarCreatorWindow(QMainWindow):
                     uni_bak.write_bytes(uni_path.read_bytes())
                 uni_path.write_bytes(write_stdb(self.db["uni"]))
                 notes.append(f"Wrote {uni_path.name} (custom names)")
-            self._dirty = False
+            self._set_dirty(False)
             self.status.showMessage(" · ".join(notes), 6000)
             QMessageBox.information(self, "Saved", "\n".join(notes) + f"\nBackup: {bak.name}")
         else:
@@ -1799,7 +2157,7 @@ class CarCreatorWindow(QMainWindow):
                         gc_path.write_bytes(db.generic_car.to_uncompressed_bytes())
             except Exception as e:
                 QMessageBox.warning(self, "GENERIC_CAR save", str(e))
-            self._dirty = False
+            self._set_dirty(False)
             self.status.showMessage(f"Wrote SpecDB under {self.folder}", 5000)
             QMessageBox.information(
                 self,
