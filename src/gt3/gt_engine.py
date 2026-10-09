@@ -400,6 +400,7 @@ def set_u16(data: bytearray, off: int, val: int) -> None:
 
 @dataclass
 class FineTuneEngine:
+    """Editable engine parameters for fine-tuning."""
     rpm: List[int] = field(default_factory=list)          # up to 16 RPM points
     torque: List[float] = field(default_factory=list)     # kgf·m matching rpm
     peak_ps: Optional[int] = None
@@ -414,7 +415,9 @@ class FineTuneChassis:
 
 @dataclass
 class FineTuneSuspension:
-
+    """GT3 SUSPENSION row fields (offsets after 16-byte header).
+    Values are raw game units — experiment carefully.
+    """
     category: Optional[int] = None       # 0=stock .. 3=full custom
     spring_f: Optional[int] = None       # +0x1F
     spring_r: Optional[int] = None       # +0x24 (rear cluster start)
@@ -429,6 +432,7 @@ class FineTuneSuspension:
 
 @dataclass
 class FineTuneDrivetrain:
+    """DRIVETRAIN + GEAR editable fields."""
     drive: Optional[int] = None          # 0=FR 1=FF 2=4WD 3=MR 4=RR
     gears: Optional[int] = None          # number of forward gears
     # Gear ratios as floats (e.g. 3.28); stored as u16 * 1000, 0xFC19 = unused
@@ -443,6 +447,7 @@ class FineTuneDrivetrain:
 
 @dataclass
 class FineTuneInfo:
+    """CAR row info fields."""
     price: Optional[int] = None
     year: Optional[int] = None
     car_type: Optional[int] = None   # 0=Road 1=Race 2=Rally
@@ -485,6 +490,7 @@ def read_chassis_finetune(db: Db, car_index: int) -> Optional[FineTuneChassis]:
     )
 
 def write_engine_finetune(db: Db, car_index: int, ft: FineTuneEngine) -> bool:
+    """Write fine-tuned engine values into the car's current ENGINE row (in-place)."""
     defn = next((d for d in PART_DEFS if d.key == "ENGINE"), None)
     if not defn:
         return False
@@ -698,6 +704,7 @@ def write_info_finetune(db: Db, car_index: int, ft: FineTuneInfo) -> bool:
     return True
 
 def apply_finetune(db: Db, car_index: int, ft: FineTuneData) -> List[str]:
+    """Apply fine-tune overrides to an already-hybridised car. Returns list of notes."""
     notes: List[str] = []
     if ft.engine:
         if write_engine_finetune(db, car_index, ft.engine):
@@ -737,6 +744,11 @@ def clone_car_gt3(
     car_type: Optional[int] = None,
     flags: Optional[int] = None,
 ) -> int:
+    """Append a new CAR row by cloning *template_index*.
+
+    The new car reuses the template's part pointers and name-string indices
+    (GT3 string tables are not rewritten here). Returns the new car index.
+    """
     if template_index < 0 or template_index >= db.car.n:
         raise IndexError(f"template index {template_index} out of range")
     es = db.car.es
@@ -928,6 +940,64 @@ def parse_stdb(raw: bytes) -> StringTable:
             s = "".join(chr(b) for b in data)
         strings.append(s.rstrip("\0"))
     return StringTable(bpc=bpc, strings=strings)
+
+
+def write_stdb(table: StringTable) -> bytes:
+    """Serialize a StringTable back to STDB bytes (same layout as parse_stdb)."""
+    bpc = table.bpc
+    strings = list(table.strings)
+    count = len(strings)
+    # Header: magic, count, bpc (i16), pad to 16
+    header = bytearray(16)
+    struct.pack_into("<IIh", header, 0, STDB_MAGIC, count, bpc)
+    # Offset table then string blobs
+    offset_table = bytearray(count * 4)
+    data = bytearray()
+    base = 16 + count * 4
+    for i, s in enumerate(strings):
+        off = base + len(data)
+        struct.pack_into("<I", offset_table, i * 4, off)
+        if bpc == 2:
+            raw = (s or "").encode("utf-16-le")
+        elif bpc == -1:
+            try:
+                raw = (s or "").encode("euc-jp", errors="replace")
+            except LookupError:
+                raw = (s or "").encode("latin-1", errors="replace")
+        else:
+            raw = bytes((ord(c) & 0xFF) for c in (s or ""))
+        data.extend(struct.pack("<H", len(raw)))
+        data.extend(raw)
+    return bytes(header) + bytes(offset_table) + bytes(data)
+
+
+def set_car_display_name(db: Db, car_index: int, uni: Optional[StringTable], name: str) -> Optional[StringTable]:
+    """Point the car's unicode name slots at a new string. Returns updated uni table.
+
+    Uses first-name slot at 0xE4 (and clears 0xE6 secondary if present) so the
+    full custom name shows as a single string.
+    """
+    if uni is None or car_index < 0 or car_index >= db.car.n:
+        return uni
+    name = (name or "").strip()
+    if not name:
+        return uni
+    # Append new string
+    new_idx = len(uni.strings)
+    uni.strings.append(name)
+    base = car_index * db.car.es
+    # Primary name index
+    set_u16(db.car.data, base + 0xE4, new_idx & 0xFFFF)
+    # Clear secondary name index (0 = often empty / first entry — use 0xFFFF if safer)
+    # Many cars use two slots; set second to same or 0
+    set_u16(db.car.data, base + 0xE6, 0)
+    # Also common alternate slots
+    try:
+        set_u16(db.car.data, base + 0x100, new_idx & 0xFFFF)
+        set_u16(db.car.data, base + 0x102, 0)
+    except Exception:
+        pass
+    return uni
 
 def parse_id_index(raw: bytes) -> Dict[int, int]:
     if len(raw) < 8 or u32(raw, 0) != IDDB_MAGIC:

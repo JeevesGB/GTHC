@@ -1,19 +1,46 @@
+"""Car Creator — standalone window launched from the GTHC launcher.
+
+Clone a template car into a new database entry while previewing:
+  - Spec stats (power, weight, drivetrain, …)
+  - Dyno graph (torque / power vs RPM)
+  - Gearbox graph (ratio “length” per gear)
+"""
 from __future__ import annotations
+
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+
 from PyQt6.QtCore import Qt, QSize, QTimer
 from PyQt6.QtGui import QAction, QColor, QBrush
 from PyQt6.QtWidgets import (
-    QApplication,QComboBox,QFileDialog,
-    QFrame,QGridLayout,QHBoxLayout,
-    QLabel,QLineEdit,QMainWindow,
-    QMessageBox,QPushButton,QSizePolicy,
-    QSpinBox,QDoubleSpinBox,QStatusBar,
-    QToolBar,QVBoxLayout,QWidget,
-    QScrollArea,QTabWidget,QSlider,
-    QAbstractItemView,QTableWidget,QTableWidgetItem,QHeaderView,
+    QDialog,
+    QApplication,
+    QComboBox,
+    QFileDialog,
+    QFrame,
+    QGridLayout,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QMainWindow,
+    QMessageBox,
+    QPushButton,
+    QSizePolicy,
+    QSpinBox,
+    QDoubleSpinBox,
+    QStatusBar,
+    QToolBar,
+    QVBoxLayout,
+    QWidget,
+    QScrollArea,
+    QTabWidget,
+    QSlider,
+    QAbstractItemView,
+    QTableWidget,
+    QTableWidgetItem,
+    QHeaderView,
 )
 
 try:
@@ -39,6 +66,9 @@ if str(ROOT / "gt4") not in sys.path:
 
 from ui.design import APP_STYLE
 from ui.folder_paths import get_folder, set_folder, get_last_game, get_recent
+from ui.car_picker import CarPickerDialog, PickerCar
+from ui.makers import guess_brand_from_text
+
 
 DRIVE_NAMES = ["FR", "FF", "4WD", "MR", "RR"]
 GEAR_COLORS = [
@@ -65,6 +95,7 @@ def _card() -> QFrame:
 
 @dataclass
 class PreviewCar:
+    """Normalised preview model for both GT3 and GT4 templates."""
 
     game: str  # "gt3" | "gt4"
     key: Any  # hex str (GT3) or row_id (GT4)
@@ -79,12 +110,12 @@ class PreviewCar:
     wheelbase: Optional[int] = None
     drive: Optional[int] = None
     gears: Optional[int] = None
-    ratios: List[float] = field(default_factory=list) 
+    ratios: List[float] = field(default_factory=list)  # forward gear ratios
     rpm: List[int] = field(default_factory=list)
     torque_curve: List[float] = field(default_factory=list)
     power_curve: List[float] = field(default_factory=list)
     idle_rpm: Optional[int] = None
-    raw: Any = None 
+    raw: Any = None  # engine-specific handle
 
 
 class CarCreatorWindow(QMainWindow):
@@ -95,14 +126,16 @@ class CarCreatorWindow(QMainWindow):
         self.setMinimumSize(1000, 640)
         self.setStyleSheet(APP_STYLE)
 
-        self.game: Optional[str] = None 
+        self.game: Optional[str] = None  # gt3 | gt4
         self.folder: Optional[Path] = None
         self.db: Any = None
         self.previews: List[PreviewCar] = []
         self.current: Optional[PreviewCar] = None
         self._seeding = False
         self._syncing = False
+        self._dirty = False
 
+        # GT3 multi-region support (primary region only for creator v1)
         self._gt3_regions: list = []
 
         self._install_crash_log()
@@ -112,6 +145,7 @@ class CarCreatorWindow(QMainWindow):
         self.status.showMessage("Loading saved database path…")
         QTimer.singleShot(80, self._safe_try_load_saved)
 
+    # ------------------------------------------------------------------ UI
     def _build_ui(self) -> None:
         tb = QToolBar()
         tb.setMovable(False)
@@ -131,9 +165,11 @@ class CarCreatorWindow(QMainWindow):
         root.setContentsMargins(10, 8, 10, 8)
         root.setSpacing(10)
 
+        # ---- LEFT: setup + form ----
         left = QVBoxLayout()
         left.setSpacing(8)
 
+        # Step 1 — source
         src_card = _card()
         src_l = QVBoxLayout(src_card)
         src_l.setContentsMargins(10, 8, 10, 8)
@@ -156,19 +192,19 @@ class CarCreatorWindow(QMainWindow):
         src_l.addWidget(self.folder_lab)
 
         src_l.addWidget(_label("Clone from", "fieldLabel"))
-        self.template_combo = QComboBox()
-        self.template_combo.setEditable(False)
-        self.template_combo.setMaxVisibleItems(20)
-        self.template_combo.setSizeAdjustPolicy(
-            QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
-        )
-        self.template_combo.setMinimumContentsLength(24)
-        self.template_combo.addItem("Load a database first…")
-        self.template_combo.setEnabled(False)
-        self.template_combo.currentIndexChanged.connect(self._on_template_changed)
-        src_l.addWidget(self.template_combo)
+        self.template_btn = QPushButton("Choose template car…")
+        self.template_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.template_btn.setEnabled(False)
+        self.template_btn.setMinimumHeight(32)
+        self.template_btn.clicked.connect(self._pick_template)
+        src_l.addWidget(self.template_btn)
+        self.template_lab = _label("No template selected", "muted")
+        src_l.addWidget(self.template_lab)
+        # Keep an invisible index for current template (into self.previews)
+        self._template_index: int = -1
         left.addWidget(src_card)
 
+        # Step 2 — edit tabs
         edit_card = _card()
         edit_l = QVBoxLayout(edit_card)
         edit_l.setContentsMargins(8, 8, 8, 8)
@@ -178,6 +214,7 @@ class CarCreatorWindow(QMainWindow):
         tabs = QTabWidget()
         tabs.setDocumentMode(True)
 
+        # --- Identity tab ---
         id_w = QWidget()
         id_l = QVBoxLayout(id_w)
         id_l.setContentsMargins(8, 10, 8, 8)
@@ -186,7 +223,7 @@ class CarCreatorWindow(QMainWindow):
 
         self.label_edit = QLineEdit()
         self.label_edit.setPlaceholderText("e.g. my_skyline_01")
-        id_l.addLayout(self._field("Label", self.label_edit, tip="GT4 internal label. GT3 keeps template name strings."))
+        id_l.addLayout(self._field("Display name / label", self.label_edit, tip="GT4: internal label + display name. GT3: written into unicode name strings on Save."))
 
         self.price_spin = QSpinBox()
         self.price_spin.setRange(0, 50_000_000)
@@ -210,6 +247,7 @@ class CarCreatorWindow(QMainWindow):
         id_l.addStretch(1)
         tabs.addTab(id_w, "Identity")
 
+        # --- Performance tab ---
         perf_w = QWidget()
         perf_l = QVBoxLayout(perf_w)
         perf_l.setContentsMargins(8, 10, 8, 8)
@@ -284,6 +322,7 @@ class CarCreatorWindow(QMainWindow):
         perf_l.addStretch(1)
         tabs.addTab(perf_w, "Performance")
 
+        # --- Torque curve tab ---
         curve_w = QWidget()
         curve_l = QVBoxLayout(curve_w)
         curve_l.setContentsMargins(8, 10, 8, 8)
@@ -319,6 +358,7 @@ class CarCreatorWindow(QMainWindow):
         curve_l.addLayout(curve_btns)
         tabs.addTab(curve_w, "Curve")
 
+        # --- Gearbox tab ---
         gear_w = QWidget()
         gear_l = QVBoxLayout(gear_w)
         gear_l.setContentsMargins(8, 10, 8, 8)
@@ -342,8 +382,8 @@ class CarCreatorWindow(QMainWindow):
             swatch.setFixedWidth(44)
             self.ratio_color_labs.append(swatch)
             row.addWidget(swatch)
-            sl = self._slider(0, 600)  
-            sl.setMaximum(2000) 
+            sl = self._slider(0, 600)  # ratio ×100, 0.00–6.00 default range
+            sl.setMaximum(2000)  # up to 20.00
             self.ratio_sliders.append(sl)
             row.addWidget(sl, 1)
             sp = QDoubleSpinBox()
@@ -355,6 +395,7 @@ class CarCreatorWindow(QMainWindow):
             sp.setMaximumWidth(100)
             self.ratio_spins.append(sp)
             row.addWidget(sp)
+            # wire after both exist
             sl.valueChanged.connect(lambda v, idx=i: self._gear_from_slider(idx, v))
             sp.valueChanged.connect(lambda v, idx=i: self._gear_from_spin(idx, v))
             gear_l.addLayout(row)
@@ -369,6 +410,7 @@ class CarCreatorWindow(QMainWindow):
         span_row.addWidget(reset_ratios)
         gear_l.addLayout(span_row)
 
+        # Quick spacing helpers
         help_row = QHBoxLayout()
         for label, fn in (
             ("Close ratios", lambda: self._gear_pack(0.85)),
@@ -386,19 +428,23 @@ class CarCreatorWindow(QMainWindow):
         edit_l.addWidget(tabs, 1)
         left.addWidget(edit_card, 1)
 
+        # Live preview: any spin change refreshes graphs
         for w in (self.ps_spin, self.tq_spin, self.rev_spin, self.idle_spin, self.mass_spin, self.wb_spin):
             w.valueChanged.connect(self._on_stats_edited)
         self.drive_spin.currentIndexChanged.connect(self._on_stats_edited)
+        # Sliders drive spins (spin signals then refresh graphs)
         self.ps_slider.valueChanged.connect(lambda v: self._from_slider(self.ps_spin, self.ps_slider, v, 1.0))
         self.tq_slider.valueChanged.connect(lambda v: self._from_slider(self.tq_spin, self.tq_slider, v, 0.1))
         self.rev_slider.valueChanged.connect(lambda v: self._from_slider(self.rev_spin, self.rev_slider, v, 1.0))
         self.mass_slider.valueChanged.connect(lambda v: self._from_slider(self.mass_spin, self.mass_slider, v, 1.0))
+        # Spins drive slider positions only (no feedback loop)
         self.ps_spin.valueChanged.connect(lambda v: self._from_spin(self.ps_slider, v, 1.0))
         self.tq_spin.valueChanged.connect(lambda v: self._from_spin(self.tq_slider, v, 10.0))
         self.rev_spin.valueChanged.connect(lambda v: self._from_spin(self.rev_slider, v, 1.0))
         self.mass_spin.valueChanged.connect(lambda v: self._from_spin(self.mass_slider, v, 1.0))
 
-        self.create_btn = QPushButton("3 · Create car in database")
+        # Step 3 — create
+        self.create_btn = QPushButton("3 · Create car (in memory)")
         self.create_btn.setObjectName("primary")
         self.create_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.create_btn.setMinimumHeight(36)
@@ -406,6 +452,7 @@ class CarCreatorWindow(QMainWindow):
         self.create_btn.clicked.connect(self._create)
         left.addWidget(self.create_btn)
 
+        # Wire game switch only after the rest of the UI exists
         last = get_last_game()
         if last == "gt4":
             self.game_combo.setCurrentIndex(1)
@@ -417,6 +464,7 @@ class CarCreatorWindow(QMainWindow):
         left_w.setMaximumWidth(420)
         root.addWidget(left_w)
 
+        # ---- RIGHT: stats + graphs ----
         right = QVBoxLayout()
         right.setSpacing(8)
 
@@ -454,6 +502,7 @@ class CarCreatorWindow(QMainWindow):
         sl.addLayout(self.stats_grid)
         right.addWidget(stats_card)
 
+        # Dyno
         dyno_card = _card()
         dl = QVBoxLayout(dyno_card)
         dl.setContentsMargins(6, 6, 6, 6)
@@ -474,6 +523,7 @@ class CarCreatorWindow(QMainWindow):
             dl.addWidget(_label("Install matplotlib for graphs: pip install matplotlib", "muted"))
         right.addWidget(dyno_card, 2)
 
+        # Gearbox
         gear_card = _card()
         gel = QVBoxLayout(gear_card)
         gel.setContentsMargins(6, 6, 6, 6)
@@ -499,6 +549,8 @@ class CarCreatorWindow(QMainWindow):
 
         self._clear_graphs("Open a database and choose a template")
 
+    # -------------------------------------------------------------- data load
+
     @staticmethod
     def _field(title: str, widget, tip: str = "") -> QVBoxLayout:
         col = QVBoxLayout()
@@ -508,6 +560,7 @@ class CarCreatorWindow(QMainWindow):
         if tip:
             lab.setToolTip(tip)
             widget.setToolTip(tip)
+        # Give spin/combo boxes room so suffixes don't clip
         if hasattr(widget, "setMinimumHeight"):
             widget.setMinimumHeight(28)
         if hasattr(widget, "setMinimumWidth"):
@@ -545,6 +598,7 @@ class CarCreatorWindow(QMainWindow):
         return col
 
     def _scale_power(self, factor: float) -> None:
+        """±% scales peaks and torque-curve table; 100% restores template."""
         if not self.current:
             return
         if abs(factor - 1.0) < 1e-9:
@@ -554,6 +608,7 @@ class CarCreatorWindow(QMainWindow):
         else:
             self.ps_spin.setValue(max(0.0, self.ps_spin.value() * factor))
             self.tq_spin.setValue(max(0.0, self.tq_spin.value() * factor))
+            # Scale table torque column
             self._seeding = True
             self.curve_table.blockSignals(True)
             for i in range(self.curve_table.rowCount()):
@@ -568,10 +623,13 @@ class CarCreatorWindow(QMainWindow):
             self._seeding = False
         self._on_stats_edited()
 
+
     def _from_slider(self, spin, slider: QSlider, slider_val: int, scale: float) -> None:
+        """Slider moved → update spin. Spin valueChanged refreshes graphs."""
         if getattr(self, "_seeding", False):
             return
         raw = float(slider_val) * scale
+        # QSpinBox requires int; QDoubleSpinBox accepts float
         from PyQt6.QtWidgets import QSpinBox, QDoubleSpinBox
         if isinstance(spin, QSpinBox) and not isinstance(spin, QDoubleSpinBox):
             new_val = int(round(raw))
@@ -587,6 +645,7 @@ class CarCreatorWindow(QMainWindow):
             spin.setValue(new_val)
 
     def _from_spin(self, slider: QSlider, spin_val: float, mult: float) -> None:
+        """Spin changed → move slider knob only (signals blocked so no loop)."""
         if getattr(self, "_seeding", False):
             return
         target = int(round(float(spin_val) * mult))
@@ -602,7 +661,9 @@ class CarCreatorWindow(QMainWindow):
         slider.setValue(target)
         slider.blockSignals(False)
 
+
     def _install_crash_log(self) -> None:
+        """Write uncaught errors to ~/GTHC_car_creator_error.log (pythonw shows nothing)."""
         import traceback as _tb
 
         def _hook(etype, value, tb):
@@ -633,20 +694,21 @@ class CarCreatorWindow(QMainWindow):
                 pass
 
     def _try_load_saved(self) -> None:
+        """Load the path stored in folder_paths.json for the selected game."""
         game = self.game_combo.currentData() or "gt3"
         path = get_folder(game)
         if path is None or not path.is_dir():
+            # Fall back to most recent existing path
             for p in get_recent(game):
                 if p.is_dir():
                     path = p
                     break
         if path is None or not path.is_dir():
             self.folder_lab.setText("No saved path — click Open folder…")
-            self.template_combo.blockSignals(True)
-            self.template_combo.clear()
-            self.template_combo.addItem("Load a database first…")
-            self.template_combo.setEnabled(False)
-            self.template_combo.blockSignals(False)
+            self.template_btn.setEnabled(False)
+            self.template_btn.setText("Choose template car…")
+            self.template_lab.setText("No template selected")
+            self._template_index = -1
             self.create_btn.setEnabled(False)
             self.status.showMessage(
                 f"No saved {game.upper()} folder in folder_paths.json. Open a folder to begin.",
@@ -661,6 +723,7 @@ class CarCreatorWindow(QMainWindow):
         self._try_load_saved()
 
     def _load_path(self, path: Path, game: str, quiet: bool = False) -> bool:
+        """Load a database folder and remember it in folder_paths.json."""
         try:
             if game == "gt3":
                 self._load_gt3(path)
@@ -699,7 +762,7 @@ class CarCreatorWindow(QMainWindow):
         self._load_path(Path(folder), game, quiet=False)
 
     def _load_gt3(self, folder: Path) -> None:
-        from gt3.gt_engine import (
+        from gt_engine import (
             open_db,
             car_count,
             car_hash,
@@ -713,7 +776,8 @@ class CarCreatorWindow(QMainWindow):
             parse_id_index,
         )
 
-        files = [] 
+        # Classify every .db in the folder (paramdb + string/index mates)
+        files = []  # list of {path, name, kind, suffix, raw}
         for p in sorted(folder.iterdir()):
             if not p.is_file() or not p.name.endswith(".db") or p.name.endswith(".bak"):
                 continue
@@ -733,6 +797,7 @@ class CarCreatorWindow(QMainWindow):
         if not paramdbs:
             raise FileNotFoundError("No paramdb*.db found in folder")
 
+        # Prefer US, then EU, then JP, then first available
         def rank(suffix: str) -> int:
             s = (suffix or "").lower()
             return {"us": 0, "eu": 1, "jp": 2, "": 3}.get(s, 9)
@@ -784,9 +849,6 @@ class CarCreatorWindow(QMainWindow):
             "id_str": id_str,
         }
         self.previews = []
-        self.template_combo.blockSignals(True)
-        self.template_combo.clear()
-        self.template_combo.setEnabled(True)
         n = car_count(db)
         for i in range(n):
             hx = hex64(car_hash(db, i))
@@ -797,6 +859,7 @@ class CarCreatorWindow(QMainWindow):
                 main = main[1:].strip()
             if not main:
                 main = f"Car {i}"
+            # Prefer "Name · code" when both exist for disambiguation
             display = main
             if nm.name and nm.code and nm.code not in main:
                 display = f"{main}  ({nm.code})"
@@ -819,6 +882,10 @@ class CarCreatorWindow(QMainWindow):
                 rpm = list(curve.rpm or [])
                 tq = list(curve.torque or [])
                 pw = list(curve.power or [])
+            tq_peak = float(st.torque) if st.torque else None
+            if tq and (tq_peak is None or tq_peak < max(tq) * 0.5):
+                tq_peak = max(tq)
+            rev_lim = int(st.rev_limit) if st.rev_limit else (int(max(rpm)) if rpm else None)
             pv = PreviewCar(
                 game="gt3",
                 key=hx,
@@ -826,9 +893,9 @@ class CarCreatorWindow(QMainWindow):
                 label=hx,
                 year=int(st.year or 0),
                 price=int(st.price or 0),
-                ps=float(st.ps) if st.ps else None,
-                torque=float(st.torque) if st.torque else None,
-                rev_limit=int(st.rev_limit) if st.rev_limit else None,
+                ps=float(st.ps) if st.ps else (max(pw) if pw else None),
+                torque=tq_peak,
+                rev_limit=rev_lim,
                 mass=int(st.mass) if st.mass else None,
                 wheelbase=int(st.wheelbase) if st.wheelbase else None,
                 drive=st.drive,
@@ -840,21 +907,16 @@ class CarCreatorWindow(QMainWindow):
                 raw=i,
             )
             self.previews.append(pv)
-            self.template_combo.addItem(pv.name, len(self.previews) - 1)
-        self.template_combo.blockSignals(False)
+        self.template_btn.setEnabled(bool(self.previews))
+        self.template_btn.setText(f"Choose template car…  ({len(self.previews)} cars)")
         if self.previews:
-            self.template_combo.setCurrentIndex(0)
-            self._on_template_changed()
-
+            self._select_template(0)
     def _load_gt4(self, folder: Path) -> None:
-        from gt4.gt4_engine import load_specdb, engine_curve_for_car, read_finetune_for_car
+        from gt4_engine import load_specdb, engine_curve_for_car, read_finetune_for_car
 
         db = load_specdb(folder)
         self.db = {"game": "gt4", "db": db, "path": folder}
         self.previews = []
-        self.template_combo.blockSignals(True)
-        self.template_combo.clear()
-        self.template_combo.setEnabled(True)
         for car in db.cars:
             try:
                 curve = engine_curve_for_car(db, car)
@@ -910,12 +972,12 @@ class CarCreatorWindow(QMainWindow):
                 raw=car,
             )
             self.previews.append(pv)
-            self.template_combo.addItem(pv.name, len(self.previews) - 1)
-        self.template_combo.blockSignals(False)
+        self.template_btn.setEnabled(bool(self.previews))
+        self.template_btn.setText(f"Choose template car…  ({len(self.previews)} cars)")
         if self.previews:
-            self.template_combo.setCurrentIndex(0)
-            self._on_template_changed()
+            self._select_template(0)
 
+    # -------------------------------------------------------------- preview
     def _on_template_changed(self) -> None:
         try:
             self._on_template_changed_impl()
@@ -929,13 +991,63 @@ class CarCreatorWindow(QMainWindow):
             except Exception:
                 pass
 
-    def _on_template_changed_impl(self) -> None:
-        idx = self.template_combo.currentData()
+    def _pick_template(self) -> None:
+        if not self.previews:
+            return
+        cars = []
+        for i, p in enumerate(self.previews):
+            layout = ""
+            if p.drive is not None and 0 <= p.drive < len(DRIVE_NAMES):
+                layout = DRIVE_NAMES[p.drive]
+            brand = guess_brand_from_text(p.name, p.label or "")
+            cars.append(PickerCar(
+                id=i,
+                name=p.name,
+                sub=p.label or "",
+                search=f"{p.name} {p.label} {p.year} {p.ps or ''} {brand}".lower(),
+                year=int(p.year or 0),
+                power=float(p.ps or 0),
+                layout=layout,
+                extra=f"Cr {p.price:,}" if p.price else "",
+                brand=brand,
+            ))
+        dlg = CarPickerDialog(cars, title="Choose template car", parent=self)
+        if dlg.exec() != int(QDialog.DialogCode.Accepted):
+            return
+        rid = dlg.selected()
+        if rid is None:
+            return
+        try:
+            idx = int(rid)
+        except Exception:
+            return
+        self._select_template(idx)
+
+    def _select_template(self, idx: int) -> None:
+        try:
+            self._on_template_changed_impl(idx)
+        except Exception as e:
+            import traceback
+            self.status.showMessage(f"Template error: {e}", 8000)
+            try:
+                (Path.home() / "GTHC_car_creator_error.log").write_text(
+                    traceback.format_exc(), encoding="utf-8"
+                )
+            except Exception:
+                pass
+
+    def _on_template_changed_impl(self, idx: Optional[int] = None) -> None:
+        if idx is None:
+            idx = self._template_index
         if idx is None or not isinstance(idx, int) or idx < 0 or idx >= len(self.previews):
             self.current = None
+            self._template_index = -1
             self._clear_graphs("Choose a template car")
             return
+        self._template_index = idx
         self.current = self.previews[int(idx)]
+        self.template_lab.setText(self.current.name)
+        self.template_btn.setText(self.current.name)
         c = self.current
         self._seeding = True
         for w in (
@@ -947,7 +1059,7 @@ class CarCreatorWindow(QMainWindow):
         try:
             self.price_spin.setValue(int(c.price or 0))
             self.year_spin.setValue(int(c.year or 2000) if (c.year or 0) >= 1900 else 2000)
-            self.label_edit.setText(f"{(c.label or 'car').rstrip('_')}_new")
+            self.label_edit.setText(f"{(c.name or c.label or 'car').split('(')[0].strip()} Custom")
             mass = int(c.mass or 0)
             self.mass_spin.setValue(max(self.mass_spin.minimum(), mass) if mass else self.mass_spin.minimum())
             wb = int(c.wheelbase or 0)
@@ -955,6 +1067,7 @@ class CarCreatorWindow(QMainWindow):
             ps = float(c.ps or 0)
             tq = float(c.torque or 0)
             rev = int(c.rev_limit or 0)
+            # Expand slider ranges if template exceeds defaults
             if ps > self.ps_slider.maximum():
                 self.ps_slider.setMaximum(int(ps) + 100)
             if tq * 10 > self.tq_slider.maximum():
@@ -978,7 +1091,9 @@ class CarCreatorWindow(QMainWindow):
                 self.ps_slider, self.tq_slider, self.rev_slider, self.mass_slider,
             ):
                 w.blockSignals(False)
+        # class / drivetrain combos
         tidx = self.type_spin.findData(0)
+        # type not on PreviewCar — leave default Road unless we store it later
         didx = self.drive_spin.findData(int(c.drive) if c.drive is not None else 0)
         if didx >= 0:
             self.drive_spin.setCurrentIndex(didx)
@@ -1060,6 +1175,7 @@ class CarCreatorWindow(QMainWindow):
         self._on_ratio_edited()
 
     def _gear_pack(self, factor: float) -> None:
+        """Tighten or spread ratios around the geometric mean."""
         ratios = self._read_ratios()
         if len(ratios) < 2:
             return
@@ -1067,6 +1183,7 @@ class CarCreatorWindow(QMainWindow):
         log_mean = sum(math.log(r) for r in ratios) / len(ratios)
         new = []
         for i, r in enumerate(ratios):
+            # pull toward or away from mean
             lr = math.log(r)
             lr2 = log_mean + (lr - log_mean) * factor
             new.append(max(0.05, math.exp(lr2)))
@@ -1106,6 +1223,7 @@ class CarCreatorWindow(QMainWindow):
             if r > 0:
                 rpm.append(r)
                 tq.append(t)
+        # sort by rpm
         pairs = sorted(zip(rpm, tq), key=lambda x: x[0])
         if not pairs:
             return [], []
@@ -1116,8 +1234,10 @@ class CarCreatorWindow(QMainWindow):
             return
         rpm, tq = self._read_curve_points()
         if rpm and tq:
+            # Update peak spins from table max without looping
             self._seeding = True
             self.tq_spin.setValue(max(tq))
+            # approximate peak PS
             pw = [(t * r) / 716.2 for r, t in zip(rpm, tq)]
             if pw:
                 self.ps_spin.setValue(max(pw))
@@ -1179,6 +1299,7 @@ class CarCreatorWindow(QMainWindow):
         if d is None:
             d = self.drive_spin.currentIndex()
         self._stat_labels["Layout"].setText(DRIVE_NAMES[d] if isinstance(d, int) and 0 <= d < len(DRIVE_NAMES) else "—")
+        # Live graphs from edited peaks + template curve shape
         self._draw_dyno(c)
         self._draw_gearbox(c)
 
@@ -1226,6 +1347,8 @@ class CarCreatorWindow(QMainWindow):
             self.gear_canvas.draw_idle()
 
     def _scaled_curves(self, c: PreviewCar):
+        """Curve from the editable table (or template), scaled to peak spins, cut at rev limit."""
+        # Prefer live table points
         if hasattr(self, "curve_table") and self.curve_table.rowCount() > 0:
             rpm, tq = self._read_curve_points()
             pw = [(t * r) / 716.2 for r, t in zip(rpm, tq)]
@@ -1240,6 +1363,7 @@ class CarCreatorWindow(QMainWindow):
         rev = int(self.rev_spin.value()) if hasattr(self, "rev_spin") else 0
         base_tq = max(tq) if tq else 0.0
         base_pw = max(pw) if pw else 0.0
+        # If table peaks already match spins, scale ≈ 1
         tq_scale = (peak_tq / base_tq) if (base_tq > 0 and peak_tq > 0) else 1.0
         pw_scale = (peak_ps / base_pw) if (base_pw > 0 and peak_ps > 0) else tq_scale
         out_rpm, out_tq, out_pw = [], [], []
@@ -1273,11 +1397,13 @@ class CarCreatorWindow(QMainWindow):
             self.dyno_ax.plot(rpm, tq, color="#2563eb", lw=2, label="Torque")
             if pw and len(pw) == len(rpm):
                 self.dyno_ax2.plot(rpm, pw, color="#dc2626", lw=2, label="Power")
+            # Rev-limit marker so the control is visibly reflected
             rev = int(self.rev_spin.value()) if hasattr(self, "rev_spin") else 0
             if rev > 0:
                 self.dyno_ax.axvline(
                     rev, color="#64748b", ls="--", lw=1.2, alpha=0.85, label="Rev limit",
                 )
+                # Ensure axis includes the marker even if curve ends earlier
                 xmax = max(max(rpm), rev) * 1.02
                 self.dyno_ax.set_xlim(left=min(rpm) * 0.98 if rpm else 0, right=xmax)
             self.dyno_ax.set_xlabel("RPM", fontsize=9)
@@ -1300,6 +1426,11 @@ class CarCreatorWindow(QMainWindow):
             pass
 
     def _draw_gearbox(self, c: Optional[PreviewCar]) -> None:
+        """Geared power graph: engine power mapped through each gear vs relative speed.
+
+        For each gear, X = engine_RPM / ratio (proxy for road speed), Y = power (kW).
+        Curves end at the redline. Similar to Team-BHP style geared power charts.
+        """
         if not HAS_MPL or self.gear_ax is None:
             return
         self.gear_ax.clear()
@@ -1374,8 +1505,20 @@ class CarCreatorWindow(QMainWindow):
         except Exception:
             pass
 
+    # -------------------------------------------------------------- create / save
     def _create(self) -> None:
         if not self.db or not self.current:
+            QMessageBox.information(self, "Create", "Load a database and choose a template first.")
+            return
+        name = self.label_edit.text().strip() or "(unnamed)"
+        reply = QMessageBox.question(
+            self,
+            "Create car?",
+            f"Clone “{self.current.name}” into a new car “{name}”?\n\n"
+            "Changes stay in memory until you Save database…",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
             return
         if self.game == "gt3":
             self._create_gt3()
@@ -1383,7 +1526,7 @@ class CarCreatorWindow(QMainWindow):
             self._create_gt4()
 
     def _create_gt3(self) -> None:
-        from gt3.gt_engine import (
+        from gt_engine import (
             clone_car_gt3, car_hash, hex64,
             FineTuneData, FineTuneEngine, FineTuneChassis, FineTuneDrivetrain, FineTuneInfo,
             apply_finetune, read_engine_finetune,
@@ -1441,27 +1584,61 @@ class CarCreatorWindow(QMainWindow):
             apply_finetune(db, new_i, ft)
         except Exception as e:
             QMessageBox.warning(self, "Stats apply warning", str(e))
+
+        # Custom display name into unicode string table (in memory)
+        display = self.label_edit.text().strip()
+        uni = self.db.get("uni")
+        if display and uni is not None:
+            from gt_engine import set_car_display_name
+            uni = set_car_display_name(db, new_i, uni, display)
+            self.db["uni"] = uni
+            self.db["uni_dirty"] = True
+
         new_hex = hex64(car_hash(db, new_i))
+        # Append preview in-memory (do NOT reload from disk)
+        rpm, tq, pw = self._scaled_curves(self.current) if self.current else ([], [], [])
+        ratios = self._read_ratios()
+        pv = PreviewCar(
+            game="gt3",
+            key=new_hex,
+            name=display or f"{self.current.name} (new)",
+            label=new_hex,
+            year=self.year_spin.value(),
+            price=self.price_spin.value(),
+            ps=self.ps_spin.value() or None,
+            torque=self.tq_spin.value() or None,
+            rev_limit=self.rev_spin.value() or None,
+            mass=self.mass_spin.value() or None,
+            wheelbase=self.wb_spin.value() or None,
+            drive=int(self.drive_spin.currentData() or 0),
+            gears=len(ratios) or None,
+            ratios=ratios,
+            rpm=rpm,
+            torque_curve=tq,
+            power_curve=pw,
+            idle_rpm=self.idle_spin.value() or None,
+            raw=new_i,
+        )
+        self.previews.append(pv)
+        self._dirty = True
+        self.template_btn.setText(f"Choose template car…  ({len(self.previews)} cars)")
+        self._select_template(len(self.previews) - 1)
         self.status.showMessage(
-            f"Created car index {new_i} ({new_hex[:12]}…) — use Save database… to write paramdb",
+            f"Created “{pv.name}” in memory — Save database… to write files",
             8000,
         )
         QMessageBox.information(
             self,
-            "Car created",
-            f"Cloned template into new CAR row #{new_i}.\n"
-            f"Hash: {new_hex}\n\n"
-            "Display name still uses the template’s string-table entries.\n"
-            "Click Save database… to write the paramdb file.",
+            "Car created (in memory)",
+            f"New car “{pv.name}” is ready in memory.\n"
+            f"Index #{new_i}  ·  {new_hex[:16]}…\n\n"
+            "It will disappear if you reload without saving.\n"
+            "Click Save database… to write paramdb"
+            + (" + name strings." if self.db.get("uni_dirty") else "."),
         )
-        # Refresh list so the new car appears
-        try:
-            self._load_gt3(self.folder)  # type: ignore
-        except Exception:
-            pass
 
     def _create_gt4(self) -> None:
-        from gt4.gt4_engine import (
+        from gt4_engine import (
             clone_car_gt4, apply_finetune_gt4, read_finetune_for_car,
             FineTuneData, FineTuneEngine, FineTuneChassis, FineTuneDrivetrain, FineTuneInfo,
         )
@@ -1512,34 +1689,66 @@ class CarCreatorWindow(QMainWindow):
             apply_finetune_gt4(db, new_car, ft)
         except Exception as e:
             QMessageBox.warning(self, "Stats apply warning", str(e))
+
+        display = self.label_edit.text().strip() or new_car.name
+        new_car.name = display
+        rpm, tq, pw = self._scaled_curves(self.current) if self.current else ([], [], [])
+        ratios = self._read_ratios()
+        pv = PreviewCar(
+            game="gt4",
+            key=new_car.row_id,
+            name=display,
+            label=new_car.label,
+            year=self.year_spin.value(),
+            price=self.price_spin.value(),
+            ps=self.ps_spin.value() or None,
+            torque=self.tq_spin.value() or None,
+            rev_limit=self.rev_spin.value() or None,
+            mass=self.mass_spin.value() or None,
+            wheelbase=self.wb_spin.value() or None,
+            drive=int(self.drive_spin.currentData() or 0),
+            gears=len(ratios) or None,
+            ratios=ratios,
+            rpm=rpm,
+            torque_curve=tq,
+            power_curve=pw,
+            idle_rpm=self.idle_spin.value() or None,
+            raw=new_car,
+        )
+        self.previews.append(pv)
+        self._dirty = True
+        self.template_btn.setText(f"Choose template car…  ({len(self.previews)} cars)")
+        self._select_template(len(self.previews) - 1)
         self.status.showMessage(
-            f"Created {new_car.name} (id {new_car.row_id}) — Save database… to write SpecDB",
+            f"Created “{display}” in memory — Save database… to write SpecDB",
             8000,
         )
         QMessageBox.information(
             self,
-            "Car created",
-            f"Created “{new_car.name}”\n"
+            "Car created (in memory)",
+            f"New car “{display}” is ready in memory.\n"
             f"GENERIC_CAR id: {new_car.row_id}\n"
             f"DEFAULT_PARTS id: {new_car.default_parts_id}\n\n"
+            "It will disappear if you reload without saving.\n"
             "Click Save database… to write SpecDB tables.",
         )
-        try:
-            self._load_gt4(self.folder)  # type: ignore
-            # select new car if present
-            for i, p in enumerate(self.previews):
-                if p.key == new_car.row_id:
-                    self.template_combo.setCurrentIndex(i)
-                    break
-        except Exception:
-            pass
+
 
     def _save(self) -> None:
         if not self.db:
             QMessageBox.information(self, "Save", "Nothing loaded.")
             return
+        if not self._dirty:
+            reply = QMessageBox.question(
+                self,
+                "Save",
+                "No new cars marked since load. Save anyway?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                return
         if self.game == "gt3":
-            from gt3.gt_engine import write_gtar
+            from gt_engine import write_gtar, write_stdb
 
             path = self.db["path"]
             bak = path.with_suffix(path.suffix + ".bak")
@@ -1547,20 +1756,57 @@ class CarCreatorWindow(QMainWindow):
                 bak.write_bytes(path.read_bytes())
             data = write_gtar(self.db["db"].arc)
             path.write_bytes(data)
-            self.status.showMessage(f"Wrote {path.name} ({len(data):,} bytes)", 5000)
-            QMessageBox.information(self, "Saved", f"Wrote {path}\nBackup: {bak.name}")
+            notes = [f"Wrote {path.name}"]
+            # Unicode name table
+            if self.db.get("uni_dirty") and self.db.get("uni") is not None:
+                # Find matching paramunistr path
+                folder = path.parent
+                suffix = self.db.get("suffix") or ""
+                candidates = []
+                if suffix:
+                    candidates.append(folder / f"paramunistr_{suffix}.db")
+                candidates += [
+                    folder / "paramunistr_us.db",
+                    folder / "paramunistr.db",
+                    folder / "paramunistr_eu.db",
+                ]
+                uni_path = next((p for p in candidates if p.is_file()), None)
+                if uni_path is None:
+                    # write next to paramdb
+                    uni_path = folder / (f"paramunistr_{suffix}.db" if suffix else "paramunistr.db")
+                uni_bak = uni_path.with_suffix(uni_path.suffix + ".bak")
+                if uni_path.is_file() and not uni_bak.is_file():
+                    uni_bak.write_bytes(uni_path.read_bytes())
+                uni_path.write_bytes(write_stdb(self.db["uni"]))
+                notes.append(f"Wrote {uni_path.name} (custom names)")
+            self._dirty = False
+            self.status.showMessage(" · ".join(notes), 6000)
+            QMessageBox.information(self, "Saved", "\n".join(notes) + f"\nBackup: {bak.name}")
         else:
-            from gt4.gt4_engine import save_default_parts
+            from gt4_engine import save_default_parts
 
             db = self.db["db"]
+            # Ensure GENERIC_CAR is marked dirty via existing append path
             out = save_default_parts(db, backup=True)
-            # generic_car / default_parts already handled inside if dirty
-            self.status.showMessage(f"Wrote SpecDB tables under {self.folder}", 5000)
+            # Also write generic_car if the helper does not
+            try:
+                if db.generic_car is not None and db.generic_car.dirty_rows:
+                    gc_path = Path(self.folder) / "GENERIC_CAR.dbt"
+                    if gc_path.is_file():
+                        bak = gc_path.with_suffix(".dbt.bak")
+                        if not bak.is_file():
+                            bak.write_bytes(gc_path.read_bytes())
+                        gc_path.write_bytes(db.generic_car.to_uncompressed_bytes())
+            except Exception as e:
+                QMessageBox.warning(self, "GENERIC_CAR save", str(e))
+            self._dirty = False
+            self.status.showMessage(f"Wrote SpecDB under {self.folder}", 5000)
             QMessageBox.information(
                 self,
                 "Saved",
-                f"Wrote DEFAULT_PARTS (and any dirty GENERIC_CAR / part tables).\n{out}",
+                f"Wrote SpecDB tables.\n{out}",
             )
+
 
 
 def main() -> int:
