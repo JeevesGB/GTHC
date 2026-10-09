@@ -8,6 +8,7 @@ from PyQt6.QtGui import (
     QDropEvent,QKeySequence,QPalette,
 )
 from PyQt6.QtWidgets import (
+    QSpinBox, QDoubleSpinBox, QAbstractItemView, QTabWidget,
     QApplication,QButtonGroup,QComboBox,QDialog,
     QDialogButtonBox,QFileDialog,QFrame,QHBoxLayout,
     QHeaderView,QLabel,QLineEdit,QListWidget,
@@ -48,6 +49,14 @@ from gt4.gt4_engine import (
     write_hybrids_summary,
     backup_default_parts,
     export_hybrids_zip,
+    FineTuneData,
+    FineTuneEngine,
+    FineTuneChassis,
+    FineTuneSuspension,
+    FineTuneDrivetrain,
+    FineTuneInfo,
+    read_finetune_for_car,
+    apply_finetune_gt4,
 )
 
 PATHS_KEY = "gt4"
@@ -121,6 +130,227 @@ class PlanRecord:
     mode: str  # "link" for now
     picks: Dict[str, int]  # part key -> donor car id
     summary: str
+    finetune: Optional[FineTuneData] = None
+
+
+
+
+
+class FineTuneDialog(QDialog):
+    """Edit engine torque curve, chassis and suspension for the current hybrid."""
+
+    def __init__(self, parent, engine=None, chassis=None, suspension=None, drivetrain=None, info=None, car_name=""):
+        super().__init__(parent)
+        self.setWindowTitle(f"Fine-tune — {car_name}" if car_name else "Fine-tune parameters")
+        self.setMinimumSize(540, 520)
+        self.setStyleSheet(APP_STYLE)
+        self._result = None
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(12, 10, 12, 10)
+        root.setSpacing(8)
+        hint = QLabel(
+            "Edit numeric values below. Changes write into the ENGINE / CHASSIS / SUSPENSION "
+            "DRIVETRAIN / GEAR / GENERIC_CAR rows the hybrid points at (shared part rows are modified)."
+        )
+        hint.setObjectName("muted")
+        hint.setWordWrap(True)
+        root.addWidget(hint)
+
+        tabs = QTabWidget()
+        root.addWidget(tabs, 1)
+
+        # Engine
+        eng_w = QWidget()
+        el = QVBoxLayout(eng_w)
+        el.setContentsMargins(6, 8, 6, 6)
+        el.setSpacing(6)
+        peaks = QHBoxLayout()
+        self.ps_spin = QDoubleSpinBox(); self.ps_spin.setRange(0, 2000); self.ps_spin.setDecimals(1); self.ps_spin.setSuffix(" PS")
+        self.tq_spin = QDoubleSpinBox(); self.tq_spin.setRange(0, 300); self.tq_spin.setDecimals(2); self.tq_spin.setSuffix(" kgf·m")
+        self.rev_spin = QSpinBox(); self.rev_spin.setRange(0, 20000); self.rev_spin.setSingleStep(100); self.rev_spin.setSuffix(" rpm")
+        self.idle_spin = QSpinBox(); self.idle_spin.setRange(0, 5000); self.idle_spin.setSingleStep(50); self.idle_spin.setSuffix(" rpm")
+        for lab, w in [("Peak power", self.ps_spin), ("Peak torque", self.tq_spin), ("Rev limit", self.rev_spin), ("Idle", self.idle_spin)]:
+            col = QVBoxLayout(); col.setSpacing(2)
+            col.addWidget(_label(lab, "fieldLabel")); col.addWidget(w); peaks.addLayout(col)
+        peaks.addStretch(); el.addLayout(peaks)
+        el.addWidget(_label("Torque curve (RPM × torque)", "fieldLabel"))
+        self.curve_table = QTableWidget(0, 2)
+        self.curve_table.setHorizontalHeaderLabels(["RPM", "Torque (kgf·m)"])
+        self.curve_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        self.curve_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        self.curve_table.verticalHeader().setVisible(False)
+        self.curve_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        el.addWidget(self.curve_table, 1)
+        crow = QHBoxLayout()
+        ab = QPushButton("Add point"); ab.clicked.connect(self._add_point)
+        db_ = QPushButton("Remove selected"); db_.clicked.connect(self._del_point)
+        crow.addWidget(ab); crow.addWidget(db_); crow.addStretch(); el.addLayout(crow)
+        tabs.addTab(eng_w, "Engine")
+
+        # Chassis
+        ch_w = QWidget(); cl = QVBoxLayout(ch_w); cl.setContentsMargins(6, 8, 6, 6); cl.setSpacing(6)
+        self.mass_spin = QSpinBox(); self.mass_spin.setRange(0, 10000); self.mass_spin.setSuffix(" kg")
+        self.wb_spin = QSpinBox(); self.wb_spin.setRange(0, 10000); self.wb_spin.setSuffix(" mm")
+        self.pct_spin = QSpinBox(); self.pct_spin.setRange(0, 100); self.pct_spin.setSuffix(" % front")
+        self.perf_f = QSpinBox(); self.perf_f.setRange(0, 255)
+        self.perf_r = QSpinBox(); self.perf_r.setRange(0, 255)
+        self.yaw_spin = QSpinBox(); self.yaw_spin.setRange(0, 255)
+        for lab, w in [
+            ("Mass", self.mass_spin), ("Wheelbase", self.wb_spin),
+            ("Weight dist (front %)", self.pct_spin),
+            ("Grip front", self.perf_f), ("Grip rear", self.perf_r), ("Yaw", self.yaw_spin),
+        ]:
+            row = QHBoxLayout(); row.addWidget(_label(lab, "fieldLabel")); row.addWidget(w, 1); cl.addLayout(row)
+        cl.addStretch()
+        tabs.addTab(ch_w, "Chassis")
+
+        # Suspension
+        su_w = QWidget(); sl = QVBoxLayout(su_w); sl.setContentsMargins(6, 8, 6, 6); sl.setSpacing(6)
+        self.spring_f = QSpinBox(); self.spring_f.setRange(0, 65535)
+        self.spring_r = QSpinBox(); self.spring_r.setRange(0, 65535)
+        self.ride_f = QSpinBox(); self.ride_f.setRange(0, 65535)
+        self.ride_r = QSpinBox(); self.ride_r.setRange(0, 65535)
+        self.damp_f = QSpinBox(); self.damp_f.setRange(0, 255)
+        self.damp_r = QSpinBox(); self.damp_r.setRange(0, 255)
+        for lab, w in [
+            ("Spring rate F", self.spring_f), ("Spring rate R", self.spring_r),
+            ("Ride height F", self.ride_f), ("Ride height R", self.ride_r),
+            ("Damper F", self.damp_f), ("Damper R", self.damp_r),
+        ]:
+            row = QHBoxLayout(); row.addWidget(_label(lab, "fieldLabel")); row.addWidget(w, 1); sl.addLayout(row)
+        note = QLabel("Suspension fields are best-effort mappings of raw SpecDB units.")
+        note.setObjectName("muted"); note.setWordWrap(True); sl.addWidget(note)
+        sl.addStretch(); tabs.addTab(su_w, "Suspension")
+
+        # Drivetrain
+        dt_w = QWidget(); dl = QVBoxLayout(dt_w); dl.setContentsMargins(6, 8, 6, 6); dl.setSpacing(6)
+        self.drive_spin = QSpinBox(); self.drive_spin.setRange(0, 4)
+        self.drive_spin.setToolTip("0=FR 1=FF 2=4WD 3=MR 4=RR")
+        self.gears_spin = QSpinBox(); self.gears_spin.setRange(1, 8)
+        row = QHBoxLayout(); row.addWidget(_label("Layout (0–4)", "fieldLabel")); row.addWidget(self.drive_spin, 1); dl.addLayout(row)
+        row = QHBoxLayout(); row.addWidget(_label("Gears", "fieldLabel")); row.addWidget(self.gears_spin, 1); dl.addLayout(row)
+        dl.addWidget(_label("Gear ratios", "fieldLabel"))
+        self.ratio_spins = []
+        for i in range(8):
+            sp = QDoubleSpinBox(); sp.setRange(0.0, 20.0); sp.setDecimals(3); sp.setSingleStep(0.01)
+            self.ratio_spins.append(sp)
+            row = QHBoxLayout(); row.addWidget(_label(f"Gear {i+1}", "fieldLabel")); row.addWidget(sp, 1); dl.addLayout(row)
+        note = QLabel("0=FR, 1=FF, 2=4WD, 3=MR, 4=RR. Ratio 0 = unused.")
+        note.setObjectName("muted"); note.setWordWrap(True); dl.addWidget(note)
+        dl.addStretch(); tabs.addTab(dt_w, "Drivetrain")
+
+        # Car info
+        info_w = QWidget(); il = QVBoxLayout(info_w); il.setContentsMargins(6, 8, 6, 6); il.setSpacing(6)
+        self.price_spin = QSpinBox(); self.price_spin.setRange(0, 50_000_000); self.price_spin.setSingleStep(1000)
+        self.year_spin = QSpinBox(); self.year_spin.setRange(1900, 2100)
+        for lab, w in [("Price (Cr)", self.price_spin), ("Year", self.year_spin)]:
+            row = QHBoxLayout(); row.addWidget(_label(lab, "fieldLabel")); row.addWidget(w, 1); il.addLayout(row)
+        note = QLabel("Writes into GENERIC_CAR (Price / Year).")
+        note.setObjectName("muted"); note.setWordWrap(True); il.addWidget(note)
+        il.addStretch(); tabs.addTab(info_w, "Car info")
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        clear_btn = buttons.addButton("Clear fine-tune", QDialogButtonBox.ButtonRole.ResetRole)
+        clear_btn.clicked.connect(self._clear)
+        buttons.accepted.connect(self._accept); buttons.rejected.connect(self.reject)
+        root.addWidget(buttons)
+
+        if engine:
+            if engine.peak_ps is not None: self.ps_spin.setValue(float(engine.peak_ps))
+            if engine.peak_torque is not None: self.tq_spin.setValue(float(engine.peak_torque))
+            if engine.rev_limit is not None: self.rev_spin.setValue(int(engine.rev_limit))
+            if engine.idle_rpm is not None: self.idle_spin.setValue(int(engine.idle_rpm))
+            for rpm, tq in zip(engine.rpm or [], engine.torque or []):
+                self._append_row(rpm, tq)
+        if chassis:
+            if chassis.mass is not None: self.mass_spin.setValue(int(chassis.mass))
+            if chassis.wheelbase is not None: self.wb_spin.setValue(int(chassis.wheelbase))
+            if chassis.percentage_f is not None: self.pct_spin.setValue(int(chassis.percentage_f))
+            if chassis.performance_f is not None: self.perf_f.setValue(int(chassis.performance_f))
+            if chassis.performance_r is not None: self.perf_r.setValue(int(chassis.performance_r))
+            if chassis.yaw is not None: self.yaw_spin.setValue(int(chassis.yaw))
+        if suspension:
+            if suspension.spring_rate_f is not None: self.spring_f.setValue(int(suspension.spring_rate_f))
+            if suspension.spring_rate_r is not None: self.spring_r.setValue(int(suspension.spring_rate_r))
+            if suspension.ride_height_f is not None: self.ride_f.setValue(int(suspension.ride_height_f))
+            if suspension.ride_height_r is not None: self.ride_r.setValue(int(suspension.ride_height_r))
+            if suspension.damper_f is not None: self.damp_f.setValue(int(suspension.damper_f))
+            if suspension.damper_r is not None: self.damp_r.setValue(int(suspension.damper_r))
+        if drivetrain:
+            if drivetrain.drive is not None: self.drive_spin.setValue(int(drivetrain.drive))
+            if drivetrain.gears is not None: self.gears_spin.setValue(int(drivetrain.gears))
+            for i, sp in enumerate(self.ratio_spins):
+                val = getattr(drivetrain, f"ratio_{i+1}", None)
+                if val is not None: sp.setValue(float(val))
+        if info:
+            if info.price is not None: self.price_spin.setValue(int(info.price))
+            if info.year is not None: self.year_spin.setValue(int(info.year))
+
+    def _append_row(self, rpm=1000, tq=10.0):
+        r = self.curve_table.rowCount(); self.curve_table.insertRow(r)
+        self.curve_table.setItem(r, 0, QTableWidgetItem(str(int(rpm))))
+        self.curve_table.setItem(r, 1, QTableWidgetItem(f"{float(tq):.2f}"))
+
+    def _add_point(self):
+        last = 1000
+        if self.curve_table.rowCount():
+            try: last = int(self.curve_table.item(self.curve_table.rowCount()-1, 0).text()) + 500
+            except Exception: pass
+        self._append_row(last, 20.0)
+
+    def _del_point(self):
+        for r in sorted({i.row() for i in self.curve_table.selectedIndexes()}, reverse=True):
+            self.curve_table.removeRow(r)
+
+    def _clear(self):
+        self._result = None; self.done(2)
+
+    def _accept(self):
+        rpms, tqs = [], []
+        for r in range(self.curve_table.rowCount()):
+            try:
+                rpm = int(float(self.curve_table.item(r, 0).text()))
+                tq = float(self.curve_table.item(r, 1).text())
+            except Exception: continue
+            if rpm > 0 and tq > 0: rpms.append(rpm); tqs.append(tq)
+        eng = FineTuneEngine(
+            rpm=rpms, torque=tqs,
+            peak_ps=self.ps_spin.value() or None,
+            peak_torque=self.tq_spin.value() or None,
+            rev_limit=self.rev_spin.value() or None,
+            idle_rpm=self.idle_spin.value() or None,
+        )
+        ch = FineTuneChassis(
+            mass=self.mass_spin.value() or None,
+            wheelbase=self.wb_spin.value() or None,
+            percentage_f=self.pct_spin.value() or None,
+            performance_f=self.perf_f.value() or None,
+            performance_r=self.perf_r.value() or None,
+            yaw=self.yaw_spin.value() or None,
+        )
+        su = FineTuneSuspension(
+            spring_rate_f=self.spring_f.value() or None,
+            spring_rate_r=self.spring_r.value() or None,
+            ride_height_f=self.ride_f.value() or None,
+            ride_height_r=self.ride_r.value() or None,
+            damper_f=self.damp_f.value() or None,
+            damper_r=self.damp_r.value() or None,
+        )
+        dt = FineTuneDrivetrain(
+            drive=self.drive_spin.value(),
+            gears=self.gears_spin.value(),
+            **{f"ratio_{i+1}": (sp.value() or None) for i, sp in enumerate(self.ratio_spins)},
+        )
+        inf = FineTuneInfo(
+            price=self.price_spin.value(),
+            year=self.year_spin.value(),
+        )
+        self._result = FineTuneData(engine=eng, chassis=ch, suspension=su, drivetrain=dt, info=inf)
+        self.accept()
+
+    def result_data(self):
+        return self._result
 
 
 class GT4HybridWindow(QMainWindow):
@@ -143,6 +373,7 @@ class GT4HybridWindow(QMainWindow):
         self.next_id = 1
         self._saved_dirty_count = 0  # dirty rows at last successful save
         self._stock_parts: Dict[int, Dict[str, Tuple[int, int]]] = {}
+        self.finetune: Optional[FineTuneData] = None
 
         self._build_ui()
         QTimer.singleShot(80, self._try_load_saved)
@@ -255,6 +486,14 @@ class GT4HybridWindow(QMainWindow):
         self.quick_btn.clicked.connect(lambda: self._pick("all"))
         self.quick_btn.setEnabled(False)
         tl.addWidget(self.quick_btn)
+        self.finetune_btn = QPushButton("Fine-tune…")
+        self.finetune_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.finetune_btn.setToolTip(
+            "Edit engine curve, chassis, suspension, drivetrain, gear ratios and car info"
+        )
+        self.finetune_btn.clicked.connect(self._open_finetune)
+        self.finetune_btn.setEnabled(False)
+        tl.addWidget(self.finetune_btn)
         ll.addWidget(tcard)
 
         self.groups_scroll = QScrollArea()
@@ -658,18 +897,31 @@ class GT4HybridWindow(QMainWindow):
             except Exception as e:
                 QMessageBox.warning(self, "Apply failed", f"{part_key}: {e}")
                 return
+        # Re-fetch car after swaps so parts keys are current
+        car = self.db.by_id[self.target_id]
+        ft_notes = []
+        if self.finetune:
+            try:
+                ft_notes = apply_finetune_gt4(self.db, car, self.finetune)
+            except Exception as e:
+                QMessageBox.warning(self, "Fine-tune failed", str(e))
+        summary = self._describe_picks(picks)
+        if self.finetune:
+            summary = (summary + " · fine-tuned") if summary else "fine-tuned"
         rec = PlanRecord(
             id=self.next_id,
             target_id=self.target_id,
             target_name=car.name,
             mode=self.mode,
             picks=dict(picks),
-            summary=self._describe_picks(picks),
+            summary=summary,
+            finetune=self.finetune,
         )
         self.next_id += 1
         self.plans.append(rec)
         self.group.clear()
         self.parts.clear()
+        self.finetune = None
         self.target_id = None
         self._refresh()
         self.status.showMessage(
@@ -693,6 +945,7 @@ class GT4HybridWindow(QMainWindow):
         self.parts.clear()
         for part_key, donor_id in plan.picks.items():
             self.parts[part_key] = donor_id
+        self.finetune = plan.finetune
         self._refresh()
         self.status.showMessage(f"Editing · {plan.target_name}", 3000)
 
@@ -708,6 +961,7 @@ class GT4HybridWindow(QMainWindow):
             mode=src.mode,
             picks=dict(src.picks),
             summary=src.summary,
+            finetune=src.finetune,
         )
         self.next_id += 1
         self.plans.append(rec)
@@ -799,6 +1053,40 @@ class GT4HybridWindow(QMainWindow):
         self.open_groups[key] = not self.open_groups.get(key, False)
         self._refresh_groups()
 
+    
+
+    def _open_finetune(self) -> None:
+        if not self.db or self.target_id is None:
+            QMessageBox.information(
+                self, "Fine-tune",
+                "Choose a target car first. Fine-tune edits engine, chassis and suspension values.",
+            )
+            return
+        car = self.db.by_id[self.target_id]
+        # Seed from current (post-donor) state by temporarily applying picks on a snapshot is complex;
+        # seed from the car as it currently sits in memory.
+        current = read_finetune_for_car(self.db, car)
+        engine = (self.finetune.engine if self.finetune and self.finetune.engine else current.engine)
+        chassis = (self.finetune.chassis if self.finetune and self.finetune.chassis else current.chassis)
+        suspension = (self.finetune.suspension if self.finetune and self.finetune.suspension else current.suspension)
+        drivetrain = (self.finetune.drivetrain if self.finetune and self.finetune.drivetrain else current.drivetrain)
+        info = (self.finetune.info if self.finetune and self.finetune.info else current.info)
+        dlg = FineTuneDialog(
+            self, engine=engine, chassis=chassis, suspension=suspension,
+            drivetrain=drivetrain, info=info, car_name=car.name,
+        )
+        code = dlg.exec()
+        if code == 2:
+            self.finetune = None
+            self.status.showMessage("Fine-tune cleared", 2500)
+            self._refresh()
+            return
+        if code != int(QDialog.DialogCode.Accepted):
+            return
+        self.finetune = dlg.result_data()
+        self.status.showMessage("Fine-tune set — applied when you add the hybrid", 4000)
+        self._refresh()
+
     def _reset_group(self, key: str, part_keys: List[str]) -> None:
         self.group.pop(key, None)
         for pk in part_keys:
@@ -831,7 +1119,18 @@ class GT4HybridWindow(QMainWindow):
     def _refresh_target(self) -> None:
         main, sub, active = self._car_caption(self.target_id, "Choose a car")
         self._set_donor_btn(self.target_btn, main, sub, active)
-        self.quick_btn.setEnabled(self.target_id is not None)
+        has = self.target_id is not None
+        self.quick_btn.setEnabled(has)
+        if hasattr(self, "finetune_btn"):
+            self.finetune_btn.setEnabled(has)
+            if self.finetune:
+                self.finetune_btn.setText("Fine-tune… ✓")
+                self.finetune_btn.setStyleSheet(
+                    "QPushButton { color: #2563eb; font-weight: 600; }"
+                )
+            else:
+                self.finetune_btn.setText("Fine-tune…")
+                self.finetune_btn.setStyleSheet("")
 
     def _refresh_groups(self) -> None:
         while self.groups_layout.count():

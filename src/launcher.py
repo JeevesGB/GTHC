@@ -4,21 +4,15 @@ from pathlib import Path
 from PyQt6.QtCore import Qt, QSize
 from PyQt6.QtGui import QIcon, QPixmap
 from PyQt6.QtWidgets import (
-    QApplication,
-    QFrame,
-    QHBoxLayout,
-    QLabel,
-    QMainWindow,
-    QMessageBox,
-    QPushButton,
-    QVBoxLayout,
+    QApplication,QFrame,
+    QHBoxLayout,QLabel,
+    QMainWindow,QMessageBox,
+    QPushButton,QVBoxLayout,
     QWidget,
 )
 from ui.design import APP_STYLE, apply_app_theme
 from ui.folder_paths import get_folder, get_last_game, set_last_game
 from version import __version__
-
-
 ROOT = Path(__file__).resolve().parent
 RES_DIR = Path(getattr(sys, "_MEIPASS", ROOT))
 ICON_PNG = RES_DIR / "ico.png"
@@ -26,16 +20,20 @@ GT3_LOGO = RES_DIR / "gt3" / "gt3.png"
 GT4_LOGO = RES_DIR / "gt4" / "gt4.png"
 BACKUP_GT3 = ROOT.parent / "gt3_hybrid_gui"
 
+SHOW_CAR_CREATOR = False # Set True to activate button
+
 
 class LauncherWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("GT Hybrid Creator")
-        self.setFixedSize(350, 365) # (WIDTH , HEIGHT)
+        # WIDTH, HEIGHT (shorter when the Car Creator button is hidden)
+        self.setFixedSize(350, 430 if SHOW_CAR_CREATOR else 358)
         self.setStyleSheet(APP_STYLE)
 
         self._gt3_win = None
         self._gt4_win = None
+        self._creator_win = None
 
         central = QWidget()
         self.setCentralWidget(central)
@@ -89,6 +87,15 @@ class LauncherWindow(QMainWindow):
                 self._open_gt4,
             )
         )
+        if SHOW_CAR_CREATOR:
+            card_l.addWidget(
+                self._game_button(
+                    ICON_PNG,
+                    "Car Creator",
+                    "Clone cars · dyno · gearbox",
+                    self._open_creator,
+                )
+            )
         root.addWidget(card)
 
         foot = QHBoxLayout()
@@ -187,7 +194,7 @@ class LauncherWindow(QMainWindow):
                 return
 
         try:
-            from hybrid_gui import HybridGarage
+            from gt3.hybrid_gui import HybridGarage
         except Exception as e:
             QMessageBox.critical(
                 self,
@@ -215,6 +222,34 @@ class LauncherWindow(QMainWindow):
         self._gt4_win.show()
 
 
+
+    def _open_creator(self) -> None:
+        try:
+            from car_creator.window import CarCreatorWindow
+        except Exception as e:
+            import traceback
+            QMessageBox.critical(
+                self,
+                "Could not load Car Creator",
+                f"{e}\n\n{traceback.format_exc()}\n\nInstall: pip install -r {ROOT / 'requirements.txt'}",
+            )
+            return
+        if self._creator_win is not None and self._creator_win.isVisible():
+            self._creator_win.raise_()
+            self._creator_win.activateWindow()
+            return
+        try:
+            self._creator_win = CarCreatorWindow()
+            self._creator_win.show()
+        except Exception as e:
+            import traceback
+            QMessageBox.critical(
+                self,
+                "Car Creator failed to open",
+                f"{e}\n\n{traceback.format_exc()}",
+            )
+
+
 def main() -> int:
     import os
     os.environ.setdefault("QT_ENABLE_HIGHDPI_SCALING", "1")
@@ -236,7 +271,7 @@ def main() -> int:
         pass
     app = QApplication(sys.argv)
     app.setApplicationName("GT Hybrid Creator")
-    app.setOrganizationName("GTHybridCreator")
+    app.setOrganizationName("JeevesGB")
     if ICON_PNG.is_file():
         app.setWindowIcon(QIcon(str(ICON_PNG)))
     apply_app_theme(app)

@@ -143,6 +143,21 @@ class DbtTable:
             )
         self.dirty_rows[index] = bytes(data)
 
+    def append_row(self, row_id: int, data: bytes) -> int:
+        """Append a new row. Returns the new index. Marks it dirty."""
+        if len(data) != self.row_size:
+            raise ValueError(
+                f"row size {len(data)} != expected {self.row_size}"
+            )
+        if row_id in self.row_ids:
+            raise ValueError(f"row id {row_id} already exists")
+        idx = self.row_count
+        self.row_ids.append(int(row_id))
+        self.row_offs.append(0)  # unused once dirty
+        self.dirty_rows[idx] = bytes(data)
+        self.row_count += 1
+        return idx
+
     def to_uncompressed_bytes(self) -> bytes:
         """Serialize the full table as an uncompressed GTDB file.
 
@@ -446,6 +461,460 @@ def engine_curve_for_car(db: "SpecDB", car: CarInfo) -> Optional[EngineCurve]:
         return None
     return engine_curve_from_row(row)
 
+
+# ---------------------------------------------------------------------------
+# Fine-tune support (engine curve, chassis, suspension)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class FineTuneEngine:
+    rpm: List[int] = field(default_factory=list)
+    torque: List[float] = field(default_factory=list)
+    peak_ps: Optional[float] = None
+    peak_torque: Optional[float] = None
+    rev_limit: Optional[int] = None
+    idle_rpm: Optional[int] = None
+
+@dataclass
+class FineTuneChassis:
+    mass: Optional[int] = None
+    wheelbase: Optional[int] = None
+    percentage_f: Optional[int] = None   # front weight %
+    performance_f: Optional[int] = None  # front grip
+    performance_r: Optional[int] = None  # rear grip
+    yaw: Optional[int] = None
+
+@dataclass
+class FineTuneSuspension:
+    """Best-effort suspension fields. Values are raw game units."""
+    spring_rate_f: Optional[int] = None
+    spring_rate_r: Optional[int] = None
+    ride_height_f: Optional[int] = None
+    ride_height_r: Optional[int] = None
+    damper_f: Optional[int] = None
+    damper_r: Optional[int] = None
+
+@dataclass
+class FineTuneDrivetrain:
+    drive: Optional[int] = None  # 0=FR 1=FF 2=4WD 3=MR 4=RR
+    gears: Optional[int] = None
+    ratio_1: Optional[float] = None
+    ratio_2: Optional[float] = None
+    ratio_3: Optional[float] = None
+    ratio_4: Optional[float] = None
+    ratio_5: Optional[float] = None
+    ratio_6: Optional[float] = None
+    ratio_7: Optional[float] = None
+    ratio_8: Optional[float] = None
+
+@dataclass
+class FineTuneInfo:
+    price: Optional[int] = None
+    year: Optional[int] = None
+
+@dataclass
+class FineTuneData:
+    engine: Optional[FineTuneEngine] = None
+    chassis: Optional[FineTuneChassis] = None
+    suspension: Optional[FineTuneSuspension] = None
+    drivetrain: Optional[FineTuneDrivetrain] = None
+    info: Optional[FineTuneInfo] = None
+
+def _pack_i16(buf: bytearray, off: int, val: int) -> None:
+    struct.pack_into("<h", buf, off, int(val))
+
+def _pack_u16(buf: bytearray, off: int, val: int) -> None:
+    struct.pack_into("<H", buf, off, int(val) & 0xFFFF)
+
+def read_engine_finetune_from_row(row: bytes) -> Optional[FineTuneEngine]:
+    curve = engine_curve_from_row(row)
+    if not curve:
+        return None
+    idle = row[88] if len(row) > 88 else 0  # empirical; may vary
+    return FineTuneEngine(
+        rpm=list(curve.rpm),
+        torque=list(curve.torque),
+        peak_ps=curve.peak_ps,
+        peak_torque=curve.peak_torque,
+        rev_limit=curve.rev_limit,
+        idle_rpm=(idle * 100) if idle else None,
+    )
+
+def write_engine_finetune_to_row(row: bytes, ft: FineTuneEngine) -> bytes:
+    buf = bytearray(row)
+    if len(buf) < 110:
+        return row
+    # clear torque/rpm slots
+    for i in range(24):
+        _pack_i16(buf, 32 + 2 * i, 0)
+        if 85 + i < len(buf):
+            buf[85 + i] = 0
+    n = min(24, len(ft.rpm), len(ft.torque))
+    for i in range(n):
+        rpm = int(ft.rpm[i])
+        tq = float(ft.torque[i])
+        if rpm <= 0 or tq <= 0:
+            continue
+        _pack_i16(buf, 32 + 2 * i, int(round(tq * 100)))
+        if 85 + i < len(buf):
+            buf[85 + i] = max(1, min(255, int(round(rpm / 100))))
+    if ft.peak_ps is not None:
+        _pack_i16(buf, 28, int(round(ft.peak_ps * 10)))
+    if ft.peak_torque is not None:
+        _pack_i16(buf, 30, int(round(ft.peak_torque * 100)))
+    if ft.rev_limit is not None and len(buf) > 110:
+        buf[110] = max(0, min(255, int(round(ft.rev_limit / 100))))
+    if ft.idle_rpm is not None and len(buf) > 88:
+        buf[88] = max(0, min(255, int(round(ft.idle_rpm / 100))))
+    return bytes(buf)
+
+# CHASSIS layout for GT4 Premium (37-byte data rows, little-endian):
+# Empirical mapping against known spreadsheet values:
+#   u16@0 length, u16@2 height, u16@4 wheelbase, u16@6 mass,
+#   u16@8 dlength, u16@10 dheight, u16@12 dmass,
+#   u8@14 performanceF, u8@15 performanceR,
+#   ... percentageF around offset 26-28
+# Confirmed from docs + sample rows.
+CHASSIS_OFF = {
+    "wheelbase": 4,   # u16
+    "mass": 6,        # u16
+    "performance_f": 14,  # u8
+    "performance_r": 15,  # u8
+    "percentage_f": 26,   # u8 (approx)
+    "yaw": 28,            # u8 (approx)
+}
+
+def read_chassis_finetune_from_row(row: bytes) -> Optional[FineTuneChassis]:
+    if not row or len(row) < 16:
+        return None
+    return FineTuneChassis(
+        wheelbase=_u16(row, CHASSIS_OFF["wheelbase"], False) or None,
+        mass=_u16(row, CHASSIS_OFF["mass"], False) or None,
+        performance_f=row[CHASSIS_OFF["performance_f"]] if len(row) > 15 else None,
+        performance_r=row[CHASSIS_OFF["performance_r"]] if len(row) > 15 else None,
+        percentage_f=row[CHASSIS_OFF["percentage_f"]] if len(row) > 26 else None,
+        yaw=row[CHASSIS_OFF["yaw"]] if len(row) > 28 else None,
+    )
+
+def write_chassis_finetune_to_row(row: bytes, ft: FineTuneChassis) -> bytes:
+    buf = bytearray(row)
+    if ft.wheelbase is not None and len(buf) > 6:
+        _pack_u16(buf, CHASSIS_OFF["wheelbase"], ft.wheelbase)
+    if ft.mass is not None and len(buf) > 8:
+        _pack_u16(buf, CHASSIS_OFF["mass"], ft.mass)
+    if ft.performance_f is not None and len(buf) > 15:
+        buf[CHASSIS_OFF["performance_f"]] = ft.performance_f & 0xFF
+    if ft.performance_r is not None and len(buf) > 15:
+        buf[CHASSIS_OFF["performance_r"]] = ft.performance_r & 0xFF
+    if ft.percentage_f is not None and len(buf) > 26:
+        buf[CHASSIS_OFF["percentage_f"]] = ft.percentage_f & 0xFF
+    if ft.yaw is not None and len(buf) > 28:
+        buf[CHASSIS_OFF["yaw"]] = ft.yaw & 0xFF
+    return bytes(buf)
+
+# SUSPENSION: first 6 u16s often look like spring-related repeated values
+SUSP_OFF = {
+    "spring_rate_f": 0,   # u16
+    "spring_rate_r": 2,   # u16
+    "ride_height_f": 12,  # u16 (empirical)
+    "ride_height_r": 14,  # u16
+    "damper_f": 45,       # u8 cluster
+    "damper_r": 46,       # u8
+}
+
+def read_suspension_finetune_from_row(row: bytes) -> Optional[FineTuneSuspension]:
+    if not row or len(row) < 16:
+        return None
+    return FineTuneSuspension(
+        spring_rate_f=_u16(row, SUSP_OFF["spring_rate_f"], False) or None,
+        spring_rate_r=_u16(row, SUSP_OFF["spring_rate_r"], False) or None,
+        ride_height_f=_u16(row, SUSP_OFF["ride_height_f"], False) if len(row) > 14 else None,
+        ride_height_r=_u16(row, SUSP_OFF["ride_height_r"], False) if len(row) > 16 else None,
+        damper_f=row[SUSP_OFF["damper_f"]] if len(row) > 46 else None,
+        damper_r=row[SUSP_OFF["damper_r"]] if len(row) > 46 else None,
+    )
+
+def write_suspension_finetune_to_row(row: bytes, ft: FineTuneSuspension) -> bytes:
+    buf = bytearray(row)
+    if ft.spring_rate_f is not None:
+        _pack_u16(buf, SUSP_OFF["spring_rate_f"], ft.spring_rate_f)
+    if ft.spring_rate_r is not None:
+        _pack_u16(buf, SUSP_OFF["spring_rate_r"], ft.spring_rate_r)
+    if ft.ride_height_f is not None and len(buf) > 14:
+        _pack_u16(buf, SUSP_OFF["ride_height_f"], ft.ride_height_f)
+    if ft.ride_height_r is not None and len(buf) > 16:
+        _pack_u16(buf, SUSP_OFF["ride_height_r"], ft.ride_height_r)
+    if ft.damper_f is not None and len(buf) > 46:
+        buf[SUSP_OFF["damper_f"]] = ft.damper_f & 0xFF
+    if ft.damper_r is not None and len(buf) > 46:
+        buf[SUSP_OFF["damper_r"]] = ft.damper_r & 0xFF
+    return bytes(buf)
+
+def apply_finetune_gt4(db: "SpecDB", car: CarInfo, ft: FineTuneData) -> List[str]:
+    """Apply fine-tune to the part rows the car currently points at. Returns notes."""
+    notes: List[str] = []
+    if ft.engine and db.engine_table:
+        eng = car.parts.get("Engine")
+        if eng:
+            row = db.engine_table.get_row_by_id(eng[0])
+            if row:
+                try:
+                    idx = db.engine_table.row_ids.index(eng[0])
+                    new_row = write_engine_finetune_to_row(row, ft.engine)
+                    db.engine_table.set_row_by_index(idx, new_row)
+                    notes.append("engine curve tuned")
+                except ValueError:
+                    notes.append("engine tune skipped (id not found)")
+            else:
+                notes.append("engine tune skipped (no row)")
+        else:
+            notes.append("engine tune skipped (no Engine part)")
+    if ft.chassis:
+        notes.extend(_apply_part_table_finetune(db, car, "Chassis", ft.chassis, read_chassis_finetune_from_row, write_chassis_finetune_to_row, "chassis"))
+    if ft.suspension:
+        notes.extend(_apply_part_table_finetune(db, car, "Suspension", ft.suspension, read_suspension_finetune_from_row, write_suspension_finetune_to_row, "suspension"))
+    if ft.drivetrain:
+        dt_key = car.parts.get("DriveTrain")
+        gear_key = car.parts.get("Gear")
+        dt_row = gear_row = None
+        dt_table = gear_table = None
+        if dt_key:
+            dt_table = _get_part_table(db, "DriveTrain")
+            if dt_table:
+                dt_row = dt_table.get_row_by_id(dt_key[0])
+        if gear_key:
+            gear_table = _get_part_table(db, "Gear")
+            if gear_table:
+                gear_row = gear_table.get_row_by_id(gear_key[0])
+        new_dt, new_gear = write_drivetrain_finetune_rows(dt_row, gear_row, ft.drivetrain)
+        if new_dt is not None and dt_table is not None and dt_key and new_dt != dt_row:
+            try:
+                idx = dt_table.row_ids.index(dt_key[0])
+                dt_table.set_row_by_index(idx, new_dt)
+                notes.append("drivetrain tuned")
+            except ValueError:
+                notes.append("drivetrain tune skipped")
+        if new_gear is not None and gear_table is not None and gear_key and new_gear != gear_row:
+            try:
+                idx = gear_table.row_ids.index(gear_key[0])
+                gear_table.set_row_by_index(idx, new_gear)
+                notes.append("gear ratios tuned")
+            except ValueError:
+                notes.append("gear tune skipped")
+    if ft.info and db.generic_car is not None:
+        try:
+            idx = db.generic_car.row_ids.index(car.row_id)
+            row = db.generic_car.get_row_by_index(idx)
+            buf = bytearray(row)
+            # GENERIC_CAR: DefaultParts key(8) + Price i32(4) + Year i16(2)
+            if ft.info.price is not None and len(buf) >= 12:
+                struct.pack_into("<i", buf, 8, int(ft.info.price))
+            if ft.info.year is not None and len(buf) >= 14:
+                struct.pack_into("<h", buf, 12, int(ft.info.year))
+            db.generic_car.set_row_by_index(idx, bytes(buf))
+            car.price = ft.info.price if ft.info.price is not None else car.price
+            car.year = ft.info.year if ft.info.year is not None else car.year
+            notes.append("car info tuned")
+        except Exception as e:
+            notes.append(f"car info tune skipped ({e})")
+    return notes
+
+def _apply_part_table_finetune(db, car, part_name, ft_obj, reader, writer, label):
+    notes = []
+    key = car.parts.get(part_name)
+    if not key:
+        notes.append(f"{label} tune skipped (no {part_name} part)")
+        return notes
+    table_path = db.folder / f"{part_name.upper()}.dbt"
+    # Chassis/Suspension may already be loaded; load on demand into a cache on SpecDB
+    cache_attr = f"_{part_name.lower()}_table"
+    table = getattr(db, cache_attr, None)
+    if table is None:
+        if not table_path.is_file():
+            notes.append(f"{label} tune skipped (no {table_path.name})")
+            return notes
+        try:
+            table = DbtTable(table_path)
+            setattr(db, cache_attr, table)
+        except Exception as e:
+            notes.append(f"{label} tune skipped ({e})")
+            return notes
+    row = table.get_row_by_id(key[0])
+    if not row:
+        notes.append(f"{label} tune skipped (no row)")
+        return notes
+    try:
+        idx = table.row_ids.index(key[0])
+        new_row = writer(row, ft_obj)
+        table.set_row_by_index(idx, new_row)
+        notes.append(f"{label} tuned")
+    except ValueError:
+        notes.append(f"{label} tune skipped (id not found)")
+    return notes
+
+def _get_part_table(db: "SpecDB", part_name: str) -> Optional[DbtTable]:
+    cache_attr = f"_{part_name.lower()}_table"
+    table = getattr(db, cache_attr, None)
+    if table is not None:
+        return table
+    p = db.folder / f"{part_name.upper()}.dbt"
+    if p.is_file():
+        try:
+            table = DbtTable(p)
+            setattr(db, cache_attr, table)
+            return table
+        except Exception:
+            return None
+    return None
+
+def read_drivetrain_finetune_from_rows(dt_row: Optional[bytes], gear_row: Optional[bytes]) -> FineTuneDrivetrain:
+    out = FineTuneDrivetrain()
+    if dt_row and len(dt_row) > 16:
+        out.drive = int(dt_row[16])
+    if gear_row and len(gear_row) >= 16:
+        # first gear ratios as u16/1000
+        for i in range(8):
+            off = 2 * i
+            if off + 2 > len(gear_row):
+                break
+            raw = _u16(gear_row, off, False)
+            if raw == 0:
+                setattr(out, f"ratio_{i+1}", None)
+            else:
+                setattr(out, f"ratio_{i+1}", raw / 1000.0)
+        # gear count: count non-zero ratios
+        count = sum(1 for i in range(8) if getattr(out, f"ratio_{i+1}") is not None)
+        out.gears = count or None
+    return out
+
+def write_drivetrain_finetune_rows(dt_row: Optional[bytes], gear_row: Optional[bytes], ft: FineTuneDrivetrain):
+    new_dt, new_gear = dt_row, gear_row
+    if dt_row is not None and ft.drive is not None and len(dt_row) > 16:
+        buf = bytearray(dt_row)
+        buf[16] = int(ft.drive) & 0xFF
+        new_dt = bytes(buf)
+    if gear_row is not None:
+        buf = bytearray(gear_row)
+        for i in range(8):
+            val = getattr(ft, f"ratio_{i+1}")
+            if val is not None and 2 * i + 2 <= len(buf):
+                raw = 0 if val <= 0 else int(round(val * 1000)) & 0xFFFF
+                _pack_u16(buf, 2 * i, raw)
+        new_gear = bytes(buf)
+    return new_dt, new_gear
+
+def read_finetune_for_car(db: "SpecDB", car: CarInfo) -> FineTuneData:
+    data = FineTuneData()
+    eng = car.parts.get("Engine")
+    if eng and db.engine_table:
+        row = db.engine_table.get_row_by_id(eng[0])
+        if row:
+            data.engine = read_engine_finetune_from_row(row)
+    for part_name, attr, reader in [
+        ("Chassis", "chassis", read_chassis_finetune_from_row),
+        ("Suspension", "suspension", read_suspension_finetune_from_row),
+    ]:
+        key = car.parts.get(part_name)
+        if not key:
+            continue
+        table = _get_part_table(db, part_name)
+        if not table:
+            continue
+        row = table.get_row_by_id(key[0])
+        if row:
+            setattr(data, attr, reader(row))
+    # Drivetrain + Gear
+    dt_key = car.parts.get("DriveTrain")
+    gear_key = car.parts.get("Gear")
+    dt_row = gear_row = None
+    if dt_key:
+        t = _get_part_table(db, "DriveTrain")
+        if t:
+            dt_row = t.get_row_by_id(dt_key[0])
+    if gear_key:
+        t = _get_part_table(db, "Gear")
+        if t:
+            gear_row = t.get_row_by_id(gear_key[0])
+    if dt_row or gear_row:
+        data.drivetrain = read_drivetrain_finetune_from_rows(dt_row, gear_row)
+    data.info = FineTuneInfo(price=car.price, year=car.year)
+    return data
+
+
+def _next_free_id(row_ids: List[int]) -> int:
+    used = set(row_ids)
+    candidate = (max(row_ids) + 1) if row_ids else 1
+    while candidate in used:
+        candidate += 1
+    return candidate
+
+def clone_car_gt4(
+    db: "SpecDB",
+    template: CarInfo,
+    *,
+    price: Optional[int] = None,
+    year: Optional[int] = None,
+    label: Optional[str] = None,
+) -> CarInfo:
+    """Create a new car by cloning template GENERIC_CAR + DEFAULT_PARTS rows.
+
+    The new car shares the same part keys as the template (link-style).
+    A new DEFAULT_PARTS row is allocated so later part swaps / fine-tune
+    do not alter the template's DEFAULT_PARTS bundle.
+    """
+    if db.generic_car is None or db.default_parts is None:
+        raise RuntimeError("SpecDB not fully loaded")
+    # Locate template indices
+    try:
+        gc_idx = db.generic_car.row_ids.index(template.row_id)
+    except ValueError as e:
+        raise ValueError(f"template GENERIC_CAR id {template.row_id} not found") from e
+    gc_row = bytearray(db.generic_car.get_row_by_index(gc_idx))
+    # DefaultParts key at offset 0 (8 bytes)
+    dp_id = template.parts.get("Brake")  # any part proves DP exists; better read from row
+    # Parse DefaultParts key from GENERIC_CAR row
+    from struct import unpack_from, pack_into
+    # little-endian key: i32 id + i32 table
+    if len(gc_row) < 8:
+        raise ValueError("GENERIC_CAR row too short")
+    old_dp_id = unpack_from("<i", gc_row, 0)[0]
+    old_dp_table = unpack_from("<i", gc_row, 4)[0]
+    dp_row = db.default_parts.get_row_by_id(old_dp_id)
+    if not dp_row:
+        raise ValueError(f"template DEFAULT_PARTS id {old_dp_id} not found")
+    new_dp_id = _next_free_id(db.default_parts.row_ids)
+    new_gc_id = _next_free_id(db.generic_car.row_ids)
+    # Append DEFAULT_PARTS clone
+    db.default_parts.append_row(new_dp_id, bytes(dp_row))
+    # Patch GENERIC_CAR: new DefaultParts key, price, year
+    pack_into("<i", gc_row, 0, new_dp_id)
+    # keep table id
+    if price is not None and len(gc_row) >= 12:
+        pack_into("<i", gc_row, 8, int(price))
+    if year is not None and len(gc_row) >= 14:
+        pack_into("<h", gc_row, 12, int(year))
+    db.generic_car.append_row(new_gc_id, bytes(gc_row))
+    # Build CarInfo
+    new_label = label or f"{template.label}_clone"
+    if db.generic_car_idi is not None:
+        db.generic_car_idi.labels[new_gc_id] = new_label
+    parts = dict(template.parts)
+    new_car = CarInfo(
+        row_id=new_gc_id,
+        label=new_label,
+        name=(label or f"{template.name} (new)"),
+        year=int(year if year is not None else template.year),
+        price=int(price if price is not None else template.price),
+        default_parts_id=new_dp_id,
+        default_parts_table=old_dp_table,
+        parts=parts,
+        maker_id=template.maker_id,
+        brand=getattr(template, "brand", "") or "",
+    )
+    db.cars.append(new_car)
+    db.by_id[new_gc_id] = new_car
+    return new_car
+
 def load_specdb(folder: Path) -> SpecDB:
     folder = folder.resolve()
     db = SpecDB(folder=folder)
@@ -588,6 +1057,32 @@ def apply_part_swap(
     target.parts[part_name] = new_key
 
 
+
+def _save_dirty_part_tables(db: SpecDB, backup: bool = True) -> List[Path]:
+    """Write any part tables that have dirty rows (ENGINE / CHASSIS / SUSPENSION)."""
+    written: List[Path] = []
+    tables = []
+    if db.engine_table is not None:
+        tables.append(db.engine_table)
+    if db.generic_car is not None:
+        tables.append(db.generic_car)
+    for attr in ("_chassis_table", "_suspension_table", "_drivetrain_table", "_gear_table"):
+        t = getattr(db, attr, None)
+        if t is not None:
+            tables.append(t)
+    for t in tables:
+        if not t.dirty_rows:
+            continue
+        out = t.path
+        if backup and out.is_file():
+            bak = out.with_suffix(out.suffix + ".bak")
+            if not bak.is_file():
+                bak.write_bytes(out.read_bytes())
+        data = t.to_uncompressed_bytes()
+        out.write_bytes(data)
+        written.append(out)
+    return written
+
 def save_default_parts(
     db: SpecDB,
     dest: Optional[Path] = None,
@@ -623,6 +1118,7 @@ def save_default_parts(
 
     data = dp.to_uncompressed_bytes()
     out.write_bytes(data)
+    _save_dirty_part_tables(db, backup=backup)
     return out
 
 
@@ -683,4 +1179,8 @@ def export_hybrids_zip(
     with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
         zf.writestr("DEFAULT_PARTS.dbt", data)
         zf.writestr("hybrids.txt", summary.encode("utf-8"))
+        for attr in ("engine_table", "generic_car", "_chassis_table", "_suspension_table", "_drivetrain_table", "_gear_table"):
+            t = getattr(db, attr, None)
+            if t is not None and t.dirty_rows:
+                zf.writestr(t.path.name, t.to_uncompressed_bytes())
     return zip_path

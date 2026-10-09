@@ -391,6 +391,377 @@ def engine_curve(db: Db, car_index: int) -> Optional[EngineCurve]:
         idle_rpm=(idle * 10) if idle else None,  # stored as rpm/10? car dump showed 80 for idle -> 800
     )
 
+
+def set_u8(data: bytearray, off: int, val: int) -> None:
+    data[off] = val & 0xFF
+
+def set_u16(data: bytearray, off: int, val: int) -> None:
+    struct.pack_into("<H", data, off, val & 0xFFFF)
+
+@dataclass
+class FineTuneEngine:
+    rpm: List[int] = field(default_factory=list)          # up to 16 RPM points
+    torque: List[float] = field(default_factory=list)     # kgf·m matching rpm
+    peak_ps: Optional[int] = None
+    peak_torque: Optional[float] = None                   # kgf·m
+    rev_limit: Optional[int] = None                       # rpm
+    idle_rpm: Optional[int] = None                        # rpm
+
+@dataclass
+class FineTuneChassis:
+    mass: Optional[int] = None          # kg
+    wheelbase: Optional[int] = None     # mm
+
+@dataclass
+class FineTuneSuspension:
+
+    category: Optional[int] = None       # 0=stock .. 3=full custom
+    spring_f: Optional[int] = None       # +0x1F
+    spring_r: Optional[int] = None       # +0x24 (rear cluster start)
+    ride_height_f: Optional[int] = None  # +0x13
+    ride_height_r: Optional[int] = None  # +0x16
+    stabilizer_f: Optional[int] = None   # +0x17 (128 = neutral)
+    stabilizer_r: Optional[int] = None   # +0x18
+    damper_f: Optional[int] = None       # +0x21
+    damper_r: Optional[int] = None       # +0x25
+    camber_f: Optional[int] = None       # +0x27
+    camber_r: Optional[int] = None       # +0x28
+
+@dataclass
+class FineTuneDrivetrain:
+    drive: Optional[int] = None          # 0=FR 1=FF 2=4WD 3=MR 4=RR
+    gears: Optional[int] = None          # number of forward gears
+    # Gear ratios as floats (e.g. 3.28); stored as u16 * 1000, 0xFC19 = unused
+    ratio_1: Optional[float] = None
+    ratio_2: Optional[float] = None
+    ratio_3: Optional[float] = None
+    ratio_4: Optional[float] = None
+    ratio_5: Optional[float] = None
+    ratio_6: Optional[float] = None
+    ratio_7: Optional[float] = None
+    ratio_8: Optional[float] = None
+
+@dataclass
+class FineTuneInfo:
+    price: Optional[int] = None
+    year: Optional[int] = None
+    car_type: Optional[int] = None   # 0=Road 1=Race 2=Rally
+    flags: Optional[int] = None
+
+@dataclass
+class FineTuneData:
+    engine: Optional[FineTuneEngine] = None
+    chassis: Optional[FineTuneChassis] = None
+    suspension: Optional[FineTuneSuspension] = None
+    drivetrain: Optional[FineTuneDrivetrain] = None
+    info: Optional[FineTuneInfo] = None
+
+def read_engine_finetune(db: Db, car_index: int) -> Optional[FineTuneEngine]:
+    curve = engine_curve(db, car_index)
+    if not curve:
+        return None
+    return FineTuneEngine(
+        rpm=list(curve.rpm),
+        torque=list(curve.torque),
+        peak_ps=curve.peak_ps,
+        peak_torque=curve.peak_torque,
+        rev_limit=curve.rev_limit,
+        idle_rpm=curve.idle_rpm,
+    )
+
+def read_chassis_finetune(db: Db, car_index: int) -> Optional[FineTuneChassis]:
+    defn = next((d for d in PART_DEFS if d.key == "CHASSIS"), None)
+    if not defn:
+        return None
+    ptr = pointer(db, car_index, defn)
+    row = part_row(db, defn, ptr)
+    if not row:
+        return None
+    block, r = row
+    base = r * block.es
+    return FineTuneChassis(
+        mass=u16(block.data, base + 0x1A) or None,
+        wheelbase=u16(block.data, base + 0x18) or None,
+    )
+
+def write_engine_finetune(db: Db, car_index: int, ft: FineTuneEngine) -> bool:
+    defn = next((d for d in PART_DEFS if d.key == "ENGINE"), None)
+    if not defn:
+        return False
+    ptr = pointer(db, car_index, defn)
+    row = part_row(db, defn, ptr)
+    if not row:
+        return False
+    block, r = row
+    base = r * block.es
+    data = block.data  # bytearray
+
+    # Clear all 16 torque/rpm slots first
+    for i in range(16):
+        set_u16(data, base + 0x1A + 2 * i, _TORQUE_UNUSED)
+        set_u8(data, base + 0x47 + i, 0)
+
+    n = min(16, len(ft.rpm), len(ft.torque))
+    for i in range(n):
+        rpm = int(ft.rpm[i])
+        tq = float(ft.torque[i])
+        if rpm <= 0 or tq <= 0:
+            continue
+        set_u16(data, base + 0x1A + 2 * i, int(round(tq * 100)))
+        set_u8(data, base + 0x47 + i, max(1, min(255, int(round(rpm / 100)))))
+
+    if ft.peak_ps is not None:
+        set_u16(data, base + 0x3A, int(ft.peak_ps) & 0xFFFF)
+    if ft.peak_torque is not None:
+        set_u16(data, base + 0x3E, int(round(ft.peak_torque * 100)) & 0xFFFF)
+    if ft.idle_rpm is not None:
+        # stored as rpm/10 in existing data (80 -> 800)
+        set_u8(data, base + 0x44, max(0, min(255, int(round(ft.idle_rpm / 10)))))
+    if ft.rev_limit is not None:
+        set_u8(data, base + 0x45, max(0, min(255, int(round(ft.rev_limit / 100)))))
+    return True
+
+def write_chassis_finetune(db: Db, car_index: int, ft: FineTuneChassis) -> bool:
+    defn = next((d for d in PART_DEFS if d.key == "CHASSIS"), None)
+    if not defn:
+        return False
+    ptr = pointer(db, car_index, defn)
+    row = part_row(db, defn, ptr)
+    if not row:
+        return False
+    block, r = row
+    base = r * block.es
+    data = block.data
+    if ft.wheelbase is not None:
+        set_u16(data, base + 0x18, int(ft.wheelbase) & 0xFFFF)
+    if ft.mass is not None:
+        set_u16(data, base + 0x1A, int(ft.mass) & 0xFFFF)
+    return True
+
+# SUSPENSION absolute offsets within part row
+_SUSP = {
+    "category": 0x10,
+    "ride_height_f": 0x13,
+    "ride_height_r": 0x16,
+    "stabilizer_f": 0x17,
+    "stabilizer_r": 0x18,
+    "spring_f": 0x1F,
+    "damper_f": 0x21,
+    "spring_r": 0x24,
+    "damper_r": 0x25,
+    "camber_f": 0x27,
+    "camber_r": 0x28,
+}
+
+def read_suspension_finetune(db: Db, car_index: int) -> Optional[FineTuneSuspension]:
+    defn = next((d for d in PART_DEFS if d.key == "SUSPENSION"), None)
+    if not defn:
+        return None
+    ptr = pointer(db, car_index, defn)
+    row = part_row(db, defn, ptr)
+    if not row:
+        return None
+    block, r = row
+    base = r * block.es
+    data = block.data
+    if base + 0x29 > len(data):
+        return None
+    def g(name: str) -> int:
+        return int(data[base + _SUSP[name]])
+    return FineTuneSuspension(
+        category=g("category"),
+        spring_f=g("spring_f"),
+        spring_r=g("spring_r"),
+        ride_height_f=g("ride_height_f"),
+        ride_height_r=g("ride_height_r"),
+        stabilizer_f=g("stabilizer_f"),
+        stabilizer_r=g("stabilizer_r"),
+        damper_f=g("damper_f"),
+        damper_r=g("damper_r"),
+        camber_f=g("camber_f"),
+        camber_r=g("camber_r"),
+    )
+
+def write_suspension_finetune(db: Db, car_index: int, ft: FineTuneSuspension) -> bool:
+    defn = next((d for d in PART_DEFS if d.key == "SUSPENSION"), None)
+    if not defn:
+        return False
+    ptr = pointer(db, car_index, defn)
+    row = part_row(db, defn, ptr)
+    if not row:
+        return False
+    block, r = row
+    base = r * block.es
+    data = block.data
+    if base + 0x29 > len(data):
+        return False
+    def s(name: str, val: Optional[int]) -> None:
+        if val is not None:
+            data[base + _SUSP[name]] = int(val) & 0xFF
+            # mirror duplicated spring_f pair
+            if name == "spring_f":
+                data[base + 0x20] = int(val) & 0xFF
+    s("category", ft.category)
+    s("spring_f", ft.spring_f)
+    s("spring_r", ft.spring_r)
+    s("ride_height_f", ft.ride_height_f)
+    s("ride_height_r", ft.ride_height_r)
+    s("stabilizer_f", ft.stabilizer_f)
+    s("stabilizer_r", ft.stabilizer_r)
+    s("damper_f", ft.damper_f)
+    s("damper_r", ft.damper_r)
+    s("camber_f", ft.camber_f)
+    s("camber_r", ft.camber_r)
+    return True
+
+
+_GEAR_UNUSED = 0xFC19
+
+def read_drivetrain_finetune(db: Db, car_index: int) -> Optional[FineTuneDrivetrain]:
+    out = FineTuneDrivetrain()
+    ddef = next((d for d in PART_DEFS if d.key == "DRIVETRAIN"), None)
+    if ddef:
+        ptr = pointer(db, car_index, ddef)
+        row = part_row(db, ddef, ptr)
+        if row:
+            block, r = row
+            base = r * block.es
+            if base + 0x15 <= len(block.data):
+                out.drive = int(block.data[base + 0x14])
+    gdef = next((d for d in PART_DEFS if d.key == "GEAR"), None)
+    if gdef:
+        ptr = pointer(db, car_index, gdef)
+        row = part_row(db, gdef, ptr)
+        if row:
+            block, r = row
+            base = r * block.es
+            data = block.data
+            if base + 0x22 <= len(data):
+                out.gears = int(data[base + 0x11]) or None
+                for i in range(8):
+                    raw = u16(data, base + 0x12 + 2 * i)
+                    val = None if raw == _GEAR_UNUSED or raw == 0 else raw / 1000.0
+                    setattr(out, f"ratio_{i+1}", val)
+    return out
+
+def write_drivetrain_finetune(db: Db, car_index: int, ft: FineTuneDrivetrain) -> List[str]:
+    notes = []
+    if ft.drive is not None:
+        ddef = next((d for d in PART_DEFS if d.key == "DRIVETRAIN"), None)
+        if ddef:
+            ptr = pointer(db, car_index, ddef)
+            row = part_row(db, ddef, ptr)
+            if row:
+                block, r = row
+                block.data[r * block.es + 0x14] = int(ft.drive) & 0xFF
+                notes.append("drivetrain layout")
+    gdef = next((d for d in PART_DEFS if d.key == "GEAR"), None)
+    if gdef and (ft.gears is not None or any(getattr(ft, f"ratio_{i}") is not None for i in range(1, 9))):
+        ptr = pointer(db, car_index, gdef)
+        row = part_row(db, gdef, ptr)
+        if row:
+            block, r = row
+            base = r * block.es
+            data = block.data
+            if ft.gears is not None:
+                data[base + 0x11] = int(ft.gears) & 0xFF
+            for i in range(8):
+                val = getattr(ft, f"ratio_{i+1}")
+                if val is not None:
+                    if val <= 0:
+                        set_u16(data, base + 0x12 + 2 * i, _GEAR_UNUSED)
+                    else:
+                        set_u16(data, base + 0x12 + 2 * i, int(round(val * 1000)) & 0xFFFF)
+            notes.append("gear ratios")
+    return notes
+
+def read_info_finetune(db: Db, car_index: int) -> Optional[FineTuneInfo]:
+    base = car_index * db.car.es
+    return FineTuneInfo(
+        price=u32(db.car.data, base + CAR_OFF["price"]),
+        year=u16(db.car.data, base + CAR_OFF["year"]),
+        car_type=u8(db.car.data, base + CAR_OFF["type"]),
+        flags=u8(db.car.data, base + CAR_OFF["flags"]),
+    )
+
+def write_info_finetune(db: Db, car_index: int, ft: FineTuneInfo) -> bool:
+    base = car_index * db.car.es
+    data = db.car.data
+    if ft.price is not None:
+        struct.pack_into("<I", data, base + CAR_OFF["price"], int(ft.price) & 0xFFFFFFFF)
+    if ft.year is not None:
+        set_u16(data, base + CAR_OFF["year"], int(ft.year) & 0xFFFF)
+    if ft.car_type is not None:
+        data[base + CAR_OFF["type"]] = int(ft.car_type) & 0xFF
+    if ft.flags is not None:
+        data[base + CAR_OFF["flags"]] = int(ft.flags) & 0xFF
+    return True
+
+def apply_finetune(db: Db, car_index: int, ft: FineTuneData) -> List[str]:
+    notes: List[str] = []
+    if ft.engine:
+        if write_engine_finetune(db, car_index, ft.engine):
+            notes.append("engine curve tuned")
+        else:
+            notes.append("engine tune skipped (no ENGINE row)")
+    if ft.chassis:
+        if write_chassis_finetune(db, car_index, ft.chassis):
+            notes.append("chassis tuned")
+        else:
+            notes.append("chassis tune skipped (no CHASSIS row)")
+    if ft.suspension:
+        if write_suspension_finetune(db, car_index, ft.suspension):
+            notes.append("suspension tuned")
+        else:
+            notes.append("suspension tune skipped (no SUSPENSION row)")
+    if ft.drivetrain:
+        sub = write_drivetrain_finetune(db, car_index, ft.drivetrain)
+        if sub:
+            notes.append("drivetrain tuned (" + ", ".join(sub) + ")")
+        else:
+            notes.append("drivetrain tune skipped")
+    if ft.info:
+        if write_info_finetune(db, car_index, ft.info):
+            notes.append("car info tuned")
+        else:
+            notes.append("car info tune skipped")
+    return notes
+
+
+def clone_car_gt3(
+    db: Db,
+    template_index: int,
+    *,
+    price: Optional[int] = None,
+    year: Optional[int] = None,
+    car_type: Optional[int] = None,
+    flags: Optional[int] = None,
+) -> int:
+    if template_index < 0 or template_index >= db.car.n:
+        raise IndexError(f"template index {template_index} out of range")
+    es = db.car.es
+    src = bytes(db.car.data[template_index * es : (template_index + 1) * es])
+    new_row = bytearray(src)
+    # New unique-ish hash: XOR high bits with (n+1) so index lookup stays unique
+    old_hash = u64(new_row, 0)
+    new_hash = (old_hash ^ ((db.car.n + 1) << 32) ^ 0xC4A15EED) & 0xFFFFFFFFFFFFFFFF
+    if new_hash == 0:
+        new_hash = 0x1
+    struct.pack_into("<Q", new_row, 0, new_hash)
+    if price is not None:
+        struct.pack_into("<I", new_row, CAR_OFF["price"], int(price) & 0xFFFFFFFF)
+    if year is not None:
+        set_u16(new_row, CAR_OFF["year"], int(year) & 0xFFFF)
+    if car_type is not None:
+        new_row[CAR_OFF["type"]] = int(car_type) & 0xFF
+    if flags is not None:
+        new_row[CAR_OFF["flags"]] = int(flags) & 0xFF
+    # Extend block
+    db.car.data.extend(new_row)
+    db.car.n += 1
+    db.car._idx = None  # invalidate hash index
+    return db.car.n - 1
+
 def apply_plan(db: Db, plan: Dict[str, Any]) -> ApplyResult:
     report: List[ReportEntry] = []
     ti = find_car(db, unhex64(plan["target"]))
@@ -459,6 +830,63 @@ def apply_plan(db: Db, plan: Dict[str, Any]) -> ApplyResult:
             dst_start = ti * db.car.es + off
             db.car.data[dst_start : dst_start + length] = db.car.data[src_start : src_start + length]
         report.append(ReportEntry(defn.key, defn.label, "copied"))
+
+    # Fine-tune numeric overrides (applied after part swaps so they hit the final rows)
+    ft = plan.get("finetune")
+    if ft and isinstance(ft, FineTuneData):
+        for note in apply_finetune(db, ti, ft):
+            report.append(ReportEntry("finetune", "Fine-tune", "tuned", note))
+    elif ft and isinstance(ft, dict):
+        # allow plain-dict plans (e.g. after serialisation)
+        data = FineTuneData()
+        eng = ft.get("engine")
+        if eng:
+            data.engine = FineTuneEngine(
+                rpm=list(eng.get("rpm") or []),
+                torque=list(eng.get("torque") or []),
+                peak_ps=eng.get("peak_ps"),
+                peak_torque=eng.get("peak_torque"),
+                rev_limit=eng.get("rev_limit"),
+                idle_rpm=eng.get("idle_rpm"),
+            )
+        ch = ft.get("chassis")
+        if ch:
+            data.chassis = FineTuneChassis(
+                mass=ch.get("mass"),
+                wheelbase=ch.get("wheelbase"),
+            )
+        su = ft.get("suspension")
+        if su:
+            data.suspension = FineTuneSuspension(
+                category=su.get("category"),
+                spring_f=su.get("spring_f"),
+                spring_r=su.get("spring_r"),
+                ride_height_f=su.get("ride_height_f"),
+                ride_height_r=su.get("ride_height_r"),
+                stabilizer_f=su.get("stabilizer_f"),
+                stabilizer_r=su.get("stabilizer_r"),
+                damper_f=su.get("damper_f"),
+                damper_r=su.get("damper_r"),
+                camber_f=su.get("camber_f"),
+                camber_r=su.get("camber_r"),
+            )
+        dt = ft.get("drivetrain")
+        if dt:
+            data.drivetrain = FineTuneDrivetrain(
+                drive=dt.get("drive"),
+                gears=dt.get("gears"),
+                **{f"ratio_{i}": dt.get(f"ratio_{i}") for i in range(1, 9)},
+            )
+        inf = ft.get("info")
+        if inf:
+            data.info = FineTuneInfo(
+                price=inf.get("price"),
+                year=inf.get("year"),
+                car_type=inf.get("car_type"),
+                flags=inf.get("flags"),
+            )
+        for note in apply_finetune(db, ti, data):
+            report.append(ReportEntry("finetune", "Fine-tune", "tuned", note))
 
     return ApplyResult(ok=True, report=report)
 
